@@ -1,29 +1,29 @@
-# Fake Gmail MCP server
+# Gmail agent prototype
 
-This phase provides a deterministic, in-memory email server using the [official Python MCP SDK](https://github.com/modelcontextprotocol/python-sdk). It contains no Gmail connection, credentials, model integration, or agent loop.
+The agent uses a provider-neutral LLM contract and an MCP client. `GMAIL_BACKEND=fake` (the default) selects the in-memory fixture server with four tools. `GMAIL_BACKEND=real` selects a separate read-only Gmail MCP server exposing only `search_emails`, `get_email`, and `get_thread`. The agent loop is shared and still enforces four iterations and three tool calls. Real email content is untrusted model input; only application code decides which advertised tools may run. Development logs contain tool names and redacted arguments, never complete message bodies.
 
-## Run locally
+## Local development
 
 ```bash
-uv sync --extra test
-uv run --extra test pytest -q
+uv sync
+uv run pytest -q
 uv run python -m fake_gmail_mcp.server
 ```
 
-The last command starts an MCP server over stdio. A client launches this process and discovers `search_emails`, `get_email`, `get_thread`, and `apply_label` through MCP `tools/list`, then invokes a tool through `tools/call` with the arguments in its advertised schema. The SDK handles transport and protocol messages.
+The fake server uses MCP stdio and has no credentials. `search_emails` performs a case-insensitive fixture substring search; real Gmail search uses Gmail query syntax and returns at most 20 messages per call. The real backend returns inline plain-text message parts and does not download attachments.
 
-`search_emails(query="")` returns metadata for all messages. A nonempty query is a case-insensitive substring matched against sender, subject, and body. Gmail query operators are not supported. `get_thread` groups messages by their fixture `thread_id` and preserves fixture order. Unknown IDs and invalid labels return tool errors.
-
-The fixture store lives in `src/fake_gmail_mcp/store.py`; the MCP adapter and development logging live in `server.py`. Each server can receive its own `FakeEmailStore`, and `store.reset()` restores the original fixtures. `apply_label` affects only that store instance. Exposing the tool does not authorize a future agent to call it; that decision belongs in a separate agent policy layer.
-
-## Task 1C agent
-
-`src/gmail_agent/core.py` defines the provider contract. The MCP client discovers schemas from the fake server; `agent.py` validates model requests and enforces the four iteration and three tool call limits. Only the four authorized fake tools are offered and executable. The Gemini adapter uses the official `google-genai` SDK with automatic function calling disabled. Logs redact argument values.
-
-Run deterministic tests with `uv run --extra test pytest -q`. They require no API key. For a later, explicit live smoke test, set `GEMINI_API_KEY` and optionally `GEMINI_MODEL` in the environment, then run:
+A later Gemini smoke run with the fake backend uses `GEMINI_API_KEY` and optionally `GEMINI_MODEL` from the environment:
 
 ```bash
 uv run python -m gmail_agent.smoke 'Find the September invoice and label it TO_REVIEW'
 ```
 
-This smoke command uses only the in-memory fake MCP server. Do not place credentials in files or shell history.
+## Manual Gmail OAuth setup
+
+1. In [Google Cloud Console](https://console.cloud.google.com/), create or select a project and [enable the Gmail API](https://console.cloud.google.com/apis/library/gmail.googleapis.com).
+2. Configure the [OAuth consent screen](https://console.cloud.google.com/auth/overview) for personal development. Choose External if using a personal Gmail account, leave the app in Testing, add your Gmail address as a test user, and add only `https://www.googleapis.com/auth/gmail.readonly`.
+3. Create an OAuth client of type **Desktop app** in [Clients](https://console.cloud.google.com/auth/clients). Download its JSON credentials file to `.secrets/client_secret.json` in this repository. The `.secrets/` directory is ignored by Git. Restrict local file access to your account.
+4. Run `uv run python -m real_gmail_mcp.oauth` locally. The command opens a browser for your sign-in and consent, then saves the token to `.secrets/gmail_token.json` with owner-only file permissions. It performs no Gmail API request. If needed, set `GMAIL_CLIENT_SECRET_FILE` and `GMAIL_TOKEN_FILE` to alternate local paths before running it.
+5. After authorization, explicitly set `GMAIL_BACKEND=real` to use the read-only server. For example, with `GEMINI_API_KEY` already in your environment, run `GMAIL_BACKEND=real uv run python -m gmail_agent.smoke 'Find recent messages from example.com'`. Do not request labels or other mutations from real Gmail.
+
+The sole OAuth scope is [`gmail.readonly`](https://developers.google.com/workspace/gmail/api/auth/scopes), required because Gmail's narrower `gmail.metadata` scope cannot search using `q` or read message bodies. The token may refresh during later use, but backend selection never opens the browser. Never commit the downloaded credentials or token.
