@@ -1,4 +1,12 @@
 .venv/
-.pytest_cache/
 __pycache__/
-*.pyc
+.pytest_cache/
+
+.env
+.env.*
+!.env.example
+
+credentials*.json
+client_secret*.json
+token*.json
+oauth*.json

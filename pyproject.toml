@@ -1,19 +1,25 @@
 [project]
 name = "gmail-agent-fake-mcp"
 version = "0.1.0"
-description = "Deterministic fake email MCP server"
-requires-python = ">=3.10"
-dependencies = ["mcp>=2,<3"]
-
-[project.optional-dependencies]
-test = ["pytest>=8,<10"]
+description = "Provider-neutral agentic Gmail prototype with a fake MCP backend"
+requires-python = ">=3.12"
+dependencies = [
+    "google-genai>=1,<2",
+    "jsonschema>=4,<5",
+    "mcp>=2,<3",
+]
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/fake_gmail_mcp"]
+packages = ["src/fake_gmail_mcp", "src/gmail_agent"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9,<10",
+]

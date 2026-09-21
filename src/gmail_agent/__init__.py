@@ -1,0 +1,1 @@
+"""Minimal fake Gmail agent."""
