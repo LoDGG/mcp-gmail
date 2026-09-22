@@ -33,6 +33,7 @@ class GeminiBatchClassifier:
                 response_mime_type="application/json",
                 response_json_schema=CLASSIFICATION_SCHEMA,
                 automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
+                thinking_config=types.ThinkingConfig(thinking_level=types.ThinkingLevel.MINIMAL),
             ),
         )
         metadata = response.usage_metadata
@@ -43,5 +44,6 @@ class GeminiBatchClassifier:
                 getattr(metadata, "prompt_token_count", None),
                 getattr(metadata, "candidates_token_count", None),
                 getattr(metadata, "total_token_count", None),
+                getattr(metadata, "thoughts_token_count", None),
             ),
         )

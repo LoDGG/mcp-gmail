@@ -36,7 +36,7 @@ The sole OAuth scope is [`gmail.modify`](https://developers.google.com/workspace
 
 ## Batch classification dry run
 
-The separate classifier searches through the configured MCP backend, sends only message ID, sender, subject, and available date/snippet to Gemini, and validates one structured result per ID. It never fetches full bodies in its first pass or calls a Gmail mutation tool. The default batch size is 10; snippets are limited to 200 characters. An `UNCERTAIN` result stays unresolved. No automatic second pass runs.
+The separate classifier searches through the configured MCP backend, sends only batch-local index, sender, subject, and available date/snippet to Gemini, then maps validated indices back to Gmail message IDs. It never fetches full bodies in its first pass or calls a Gmail mutation tool. The default batch size is 10; snippets are limited to 200 characters. An `UNCERTAIN` result stays unresolved. No automatic second pass runs.
 
 ```bash
 uv run python -m gmail_agent.classify_cli --query invoice --batch-size 10
@@ -63,3 +63,98 @@ uv run python -m gmail_agent.taxonomy_stats
 ```
 
 The review CLI shows one saved prediction at a time. Accept records the prediction as ground truth; correct records only changed fields; skip leaves it pending. Pending predictions are never ground truth. The stats command uses local SQLite data only and reports category distribution, UNCERTAIN and confidence distributions, correction and disagreement rates, confusion counts, and deterministic proposal candidates. Confidence is a model score, not measured accuracy. Candidate types are CREATE, MERGE, SPLIT, DEPRECATE, and REFINE_DEFINITION. Candidates do not modify the taxonomy; use `uv run python -m gmail_agent.taxonomy_stats --save-proposals` only if you want to keep candidate records for later review.
+
+## Safe automatic triage
+
+`config/gmail_labels.json` fixes the triage labels: ADMIN→Admin, FINANCE→Billing, PURCHASE→Purchase, APPOINTMENT→Appointment, TRAVEL→Journeys, PROFESSIONAL→Professional, PERSONAL→Personal, SECURITY→Security, NEWSLETTER→Newsletter, NOTIFICATION→Notification, plus Review and Processed. Internal taxonomy names and saved history are unchanged. No `AI/` prefix is used. In `--apply` mode, triage lists existing Gmail user labels, creates only missing names from this static allowlist, and resolves their Gmail IDs before it asks Gemini to classify. If Gmail rejects a configured name, triage reports that exact name and stops before classification or message labeling. Model output never supplies a label name or controls creation. Repeated runs reuse existing labels; no labels are renamed or deleted. Dry-run mode creates nothing.
+
+The default query is `in:inbox -label:"Processed" newer_than:14d`, with batch size 10 and a maximum of 10 emails. An empty result makes no Gemini request. A prediction at confidence 0.90 or higher gets its mapped category label; lower confidence or `UNCERTAIN` gets Review. Processed is added last, only after the first label succeeds. No other Gmail mutation is used. Valid predictions are saved to local history before message labels are applied, and remain unreviewed until a human accepts or corrects them.
+
+Real label creation and application require both `GMAIL_LABEL_WRITES=1` and `--apply`. Without `--apply`, triage only classifies and saves results, even if label writes are enabled elsewhere. `classify_cli` remains dry-run only.
+
+For a deliberate real five-email test:
+
+```bash
+GMAIL_BACKEND=real GMAIL_LABEL_WRITES=1 uv run python -m gmail_agent.triage_cli --apply --query 'in:inbox -label:"Processed" newer_than:14d' --max-emails 5 --batch-size 5
+```
+
+For a future scheduled ten-email run, use the same command with `--max-emails 10 --batch-size 10`. Triage prints emails found/classified, each chosen category and action, processed status, Gemini request count, and input/output/thinking/total token counts when available. It never prints full bodies.
+
+## Unattended Linux VPS runtime
+
+The VPS needs network access to Gmail and Gemini, Python 3.12+, `uv`, `bash`, `flock` (util-linux), and systemd. No GPU is needed. `scripts/run_triage.sh` runs the same ten-email apply workflow as above with `GMAIL_BACKEND=real` and `GMAIL_LABEL_WRITES=1`. It uses a non-blocking lock in `.local/triage.lock`; an overlapping run exits successfully before loading secrets or making API requests. Start/end timestamps and concise CLI output append to `.local/triage.log`. The log and `.local/` directory are private to the deployment user.
+
+The VPS must have these private files in the repository:
+
+- `.secrets/client_secret.json`
+- `.secrets/gmail_token.json` (authorized locally first; the VPS does not run browser OAuth)
+- `.secrets/gemini.env`, with exactly one unquoted `GEMINI_API_KEY=...` assignment
+
+`.secrets/` and `.local/` are Git ignored. Never put secret values in systemd units. On the VPS, run `chmod 700 .secrets` and `chmod 600 .secrets/*` after transfer. The wrapper reads the key file as data and does not print it.
+
+### Copy code and secrets from WSL
+
+Replace `user@vps.example` and `/home/user/gmail-agent` with your VPS login and chosen absolute repository path. The path used for systemd should have no spaces. From the WSL repository root, after the local Gmail OAuth token has been created:
+
+```bash
+VPS='user@vps.example'
+REMOTE_REPO='/home/user/gmail-agent'
+git check-ignore .secrets/client_secret.json .secrets/gmail_token.json .secrets/gemini.env
+ssh "$VPS" "mkdir -p '$REMOTE_REPO/.secrets' && chmod 700 '$REMOTE_REPO/.secrets'"
+rsync -az --exclude='.git' --exclude='.venv' --exclude='.local' --exclude='.secrets' ./ "$VPS:$REMOTE_REPO/"
+scp .secrets/client_secret.json .secrets/gmail_token.json .secrets/gemini.env "$VPS:$REMOTE_REPO/.secrets/"
+ssh "$VPS" "chmod 700 '$REMOTE_REPO/.secrets' && chmod 600 '$REMOTE_REPO'/.secrets/*"
+```
+
+Alternatively, once the code is in a remote repository, clone it on the VPS in place of `rsync`; still transfer the three secret files separately over SSH. The `rsync` command includes local uncommitted code but excludes credentials, the local database, and the virtual environment.
+
+### Prepare and verify on the VPS
+
+SSH to the VPS and set the path to the same absolute directory:
+
+```bash
+REPO_DIR='/home/user/gmail-agent'
+cd "$REPO_DIR"
+# If uv is absent, install it following the official installer:
+curl -LsSf https://astral.sh/uv/install.sh | sh
+export PATH="$HOME/.local/bin:$PATH"
+uv sync --locked
+chmod 700 .secrets
+chmod 600 .secrets/*
+GMAIL_BACKEND=real GMAIL_LABEL_WRITES=0 uv run --env-file .secrets/gemini.env python -m gmail_agent.triage_cli --query 'in:inbox -label:"Processed" newer_than:14d' --max-emails 5 --batch-size 5
+```
+
+The last command is a manual dry run: it uses live APIs for at most five emails, saves predictions locally, and creates or applies no Gmail labels. Run it yourself only after confirming the copied token and key. The scheduled wrapper performs label writes and therefore requires separate activation below.
+
+### Install the systemd timer on the VPS
+
+The service template has `@RUN_USER@` and `@REPO_ROOT@` placeholders. Render them for the chosen deployment account and absolute path, then install the timer:
+
+```bash
+cd "$REPO_DIR"
+RUN_USER="$(id -un)"
+sed -e "s|@RUN_USER@|$RUN_USER|g" -e "s|@REPO_ROOT@|$REPO_DIR|g" deploy/systemd/gmail-agent-triage.service | sudo tee /etc/systemd/system/gmail-agent-triage.service >/dev/null
+sudo install -m 0644 deploy/systemd/gmail-agent-triage.timer /etc/systemd/system/gmail-agent-triage.timer
+sudo systemctl daemon-reload
+sudo systemctl enable --now gmail-agent-triage.timer
+```
+
+The timer starts ten minutes after boot and then approximately every six hours after each service activation. `Persistent=true` applies to calendar timers, not this `OnBootSec`/`OnUnitActiveSec` schedule; the boot trigger provides the post-reboot run.
+
+Inspect status and logs, or deliberately trigger one service execution:
+
+```bash
+systemctl status gmail-agent-triage.timer
+systemctl list-timers --all gmail-agent-triage.timer
+tail -n 50 "$REPO_DIR/.local/triage.log"
+sudo journalctl -u gmail-agent-triage.service -n 50 --no-pager
+sudo systemctl start gmail-agent-triage.service
+```
+
+Stop and remove the timer and service units if needed:
+
+```bash
+sudo systemctl disable --now gmail-agent-triage.timer
+sudo rm /etc/systemd/system/gmail-agent-triage.timer /etc/systemd/system/gmail-agent-triage.service
+sudo systemctl daemon-reload
+```

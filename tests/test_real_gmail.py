@@ -6,6 +6,7 @@ import pytest
 from mcp import Client
 
 from gmail_agent.backends import create_configured_server
+from gmail_agent.triage import load_label_mapping
 from real_gmail_mcp.backend import RealGmailBackend
 from real_gmail_mcp import oauth
 from real_gmail_mcp.server import create_server
@@ -55,15 +56,23 @@ class Threads:
 class Labels:
     def __init__(self):
         self.calls = []
-
-    def list(self, **kwargs):
-        self.calls.append(kwargs)
-        return Request({"labels": [
+        self.creates = []
+        self.items = [
             {"id": "Label_7", "name": "ToReview", "type": "user"},
             {"id": "INBOX", "name": "INBOX", "type": "system"},
             {"id": "STARRED", "name": "STARRED", "type": "system"},
             {"id": "SENT", "name": "SENT", "type": "system"},
-        ]})
+        ]
+
+    def list(self, **kwargs):
+        self.calls.append(kwargs)
+        return Request({"labels": list(self.items)})
+
+    def create(self, **kwargs):
+        self.creates.append(kwargs)
+        label = {"id": f"Label_{len(self.items) + 1}", "name": kwargs["body"]["name"], "type": "user"}
+        self.items.append(label)
+        return Request(label)
 
 
 class Service:
@@ -114,6 +123,64 @@ def test_read_mapping_and_only_read_api_calls(service):
     with pytest.raises(PermissionError, match="disabled"):
         backend.apply_label("msg-1", "ToReview")
     assert service.labels_api.calls == []
+
+
+def test_existing_user_labels_are_resolved_once_for_label_additions(service):
+    backend = RealGmailBackend(service, allow_label_writes=True)
+    assert backend.existing_user_labels() == {"ToReview"}
+    backend.apply_label("msg-1", "ToReview")
+    backend.apply_label("msg-1", "ToReview")
+    assert service.labels_api.calls == [{"userId": "me"}]
+    assert [call for call in service.messages_api.calls if call[0] == "modify"] == [
+        ("modify", {"userId": "me", "id": "msg-1", "body": {"addLabelIds": ["Label_7"]}}),
+        ("modify", {"userId": "me", "id": "msg-1", "body": {"addLabelIds": ["Label_7"]}}),
+    ]
+
+
+def test_only_static_missing_triage_labels_are_created_once_and_resolved(service):
+    backend = RealGmailBackend(service, allow_label_writes=True)
+    required = load_label_mapping().required_labels
+    service.labels_api.items.append({"id": "Label_Billing", "name": "Billing", "type": "user"})
+    first = backend.ensure_triage_labels()
+    second = backend.ensure_triage_labels()
+    assert set(first) == required
+    assert second == first
+    assert [call["body"] for call in service.labels_api.creates] == [
+        {"name": name} for name in sorted(required - {"Billing"})
+    ]
+    assert all(call["userId"] == "me" for call in service.labels_api.creates)
+    assert len(service.labels_api.creates) == 11
+    assert first["Billing"] == "Label_Billing"
+    backend.apply_label("msg-1", "Billing")
+    assert service.messages_api.calls[-1] == (
+        "modify", {"userId": "me", "id": "msg-1", "body": {"addLabelIds": [first["Billing"]]}}
+    )
+
+
+def test_triage_label_creation_requires_backend_write_opt_in(service):
+    backend = RealGmailBackend(service)
+    with pytest.raises(PermissionError, match="disabled"):
+        backend.ensure_triage_labels()
+    assert service.labels_api.calls == []
+    assert service.labels_api.creates == []
+
+
+def test_reserved_configured_label_failure_names_label_and_stops(service):
+    required = load_label_mapping().required_labels
+    service.labels_api.items.extend(
+        {"id": f"Label_{name}", "name": name, "type": "user"}
+        for name in required - {"Billing"}
+    )
+
+    def reject_create(**kwargs):
+        assert kwargs == {"userId": "me", "body": {"name": "Billing"}}
+        raise ValueError("reserved label")
+
+    service.labels_api.create = reject_create
+    backend = RealGmailBackend(service, allow_label_writes=True)
+    with pytest.raises(ValueError, match="configured Gmail label 'Billing'"):
+        backend.ensure_triage_labels()
+    assert service.messages_api.calls == []
 
 
 @pytest.mark.anyio

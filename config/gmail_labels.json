@@ -1,0 +1,16 @@
+{
+  "category_labels": {
+    "ADMIN": "Admin",
+    "FINANCE": "Billing",
+    "PURCHASE": "Purchase",
+    "APPOINTMENT": "Appointment",
+    "TRAVEL": "Journeys",
+    "PROFESSIONAL": "Professional",
+    "PERSONAL": "Personal",
+    "SECURITY": "Security",
+    "NEWSLETTER": "Newsletter",
+    "NOTIFICATION": "Notification"
+  },
+  "review_label": "Review",
+  "processed_label": "Processed"
+}

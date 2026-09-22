@@ -2,7 +2,7 @@
 
 import json
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 
 from jsonschema import ValidationError, validate
 
@@ -44,6 +44,7 @@ class Usage:
     input_tokens: int | None = None
     output_tokens: int | None = None
     total_tokens: int | None = None
+    thinking_tokens: int | None = None
 
 
 @dataclass(frozen=True)
@@ -62,6 +63,7 @@ class BatchReport:
     usage: list[Usage]
     batch_sizes: list[int]
     request_count: int
+    emails_found: int = 0
 
 
 class ClassificationError(ValueError):
@@ -99,6 +101,7 @@ def _compact(message: dict[str, Any], snippet_chars: int) -> dict[str, str]:
 async def classify_search(
     query: str, provider: BatchClassifierProvider, mcp: GmailMCPClient,
     *, batch_size: int = BATCH_SIZE, max_emails: int = 20, snippet_chars: int = SNIPPET_CHARS,
+    before_classify: Callable[[], None] | None = None,
 ) -> BatchReport:
     if batch_size < 1 or max_emails < 1 or snippet_chars < 1:
         raise ValueError("batch_size, max_emails, and snippet_chars must be positive")
@@ -109,6 +112,8 @@ async def classify_search(
     if not isinstance(messages, list):
         raise ClassificationError("Email search returned no message list")
     emails = messages[:max_emails]
+    if emails and before_classify is not None:
+        before_classify()
     all_results: list[dict[str, Any]] = []
     usage: list[Usage] = []
     batch_sizes: list[int] = []
@@ -119,4 +124,4 @@ async def classify_search(
         all_results.extend(parse_results(response.text, [email["id"] for email in batch]))
         usage.append(response.usage)
         batch_sizes.append(len(batch))
-    return BatchReport(all_results, usage, batch_sizes, len(usage))
+    return BatchReport(all_results, usage, batch_sizes, len(usage), len(messages))

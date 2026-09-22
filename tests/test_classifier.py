@@ -163,5 +163,6 @@ async def test_gemini_structured_output_and_usage_mapping_without_network():
     assert request["config"].response_json_schema["properties"]["results"]["type"] == "array"
     assert request["config"].tools is None
     assert request["config"].automatic_function_calling.disable is True
+    assert request["config"].thinking_config.thinking_level == types.ThinkingLevel.MINIMAL
     assert "message_id" not in request["contents"]
     assert response.usage == Usage("gemini-3.6-flash", 15, 7, 25)

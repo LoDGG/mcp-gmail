@@ -1,0 +1,11 @@
+[Unit]
+Description=Run Gmail agent triage approximately every six hours
+
+[Timer]
+Unit=gmail-agent-triage.service
+OnBootSec=10min
+OnUnitActiveSec=6h
+AccuracySec=5min
+
+[Install]
+WantedBy=timers.target

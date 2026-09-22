@@ -5,6 +5,7 @@ from typing import Any
 
 from googleapiclient.discovery import build
 
+from gmail_agent.triage import load_label_mapping
 from real_gmail_mcp.oauth import load_credentials
 
 
@@ -40,6 +41,36 @@ class RealGmailBackend:
     def __init__(self, service=None, *, allow_label_writes: bool = False) -> None:
         self._service = service if service is not None else build("gmail", "v1", credentials=load_credentials(), cache_discovery=False)
         self.allow_label_writes = allow_label_writes
+        self._user_label_ids: dict[str, str] | None = None
+        self._system_label_names: set[str] = set()
+
+    def existing_user_labels(self) -> set[str]:
+        """List existing user-label names and retain their IDs for this run."""
+        labels = self._service.users().labels().list(userId="me").execute().get("labels", [])
+        self._system_label_names = {item["name"] for item in labels if item.get("type") == "system" and item.get("name")}
+        self._user_label_ids = {
+            item["name"]: item["id"] for item in labels
+            if item.get("type") == "user" and item.get("name") and item.get("id")
+        }
+        return set(self._user_label_ids)
+
+    def ensure_triage_labels(self) -> dict[str, str]:
+        """Create only missing names from the static triage configuration."""
+        if not self.allow_label_writes:
+            raise PermissionError("Real Gmail label writes are disabled")
+        required = load_label_mapping().required_labels
+        existing = self.existing_user_labels()
+        for name in sorted(required - existing):
+            try:
+                created = self._service.users().labels().create(
+                    userId="me", body={"name": name}
+                ).execute()
+            except Exception:
+                raise ValueError(f"Failed to create configured Gmail label {name!r}") from None
+            if created.get("name") != name or created.get("type") != "user" or not created.get("id"):
+                raise ValueError(f"Gmail did not return the expected user label {name!r}")
+            self._user_label_ids[name] = created["id"]
+        return {name: self._user_label_ids[name] for name in sorted(required)}
 
     def search_emails(self, query: str = "") -> list[dict[str, Any]]:
         if not isinstance(query, str):
@@ -68,13 +99,13 @@ class RealGmailBackend:
             raise ValueError("label must be a non-empty exact label name")
         if label.upper() in {"INBOX", "SPAM", "TRASH", "UNREAD", "STARRED"}:
             raise ValueError("System labels cannot be applied")
-        labels = self._service.users().labels().list(userId="me").execute().get("labels", [])
-        match = next((item for item in labels if item.get("name") == label), None)
-        if match is None:
+        if self._user_label_ids is None:
+            self.existing_user_labels()
+        label_id = self._user_label_ids.get(label)
+        if label_id is None:
+            if label in self._system_label_names:
+                raise ValueError("System labels cannot be applied")
             raise ValueError("Unknown Gmail label")
-        if match.get("type") != "user":
-            raise ValueError("System labels cannot be applied")
-        label_id = match["id"]
         updated = self._service.users().messages().modify(
             userId="me", id=message_id, body={"addLabelIds": [label_id]}
         ).execute()

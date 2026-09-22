@@ -1,0 +1,11 @@
+[Unit]
+Description=Gmail agent batch triage
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=@RUN_USER@
+WorkingDirectory=@REPO_ROOT@
+ExecStart=@REPO_ROOT@/scripts/run_triage.sh
+UMask=0077
