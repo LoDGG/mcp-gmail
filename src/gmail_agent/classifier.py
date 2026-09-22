@@ -8,13 +8,11 @@ from jsonschema import ValidationError, validate
 
 from gmail_agent.core import ToolCall
 from gmail_agent.mcp_client import GmailMCPClient
+from gmail_agent.taxonomy import IMPORTANCE_VALUES, load_taxonomy
 
 BATCH_SIZE = 10
 SNIPPET_CHARS = 200
-CATEGORIES = (
-    "ACTION_REQUIRED", "IMPORTANT_INFO", "ADMIN", "INVOICE", "APPOINTMENT",
-    "PURCHASE", "NEWSLETTER", "NOTIFICATION", "LOW_PRIORITY", "UNCERTAIN",
-)
+CATEGORIES = load_taxonomy().active_names
 
 CLASSIFICATION_SCHEMA = {
     "type": "object",
@@ -27,10 +25,11 @@ CLASSIFICATION_SCHEMA = {
                 "category": {"type": "string", "enum": list(CATEGORIES)},
                 "confidence": {"type": "number", "minimum": 0, "maximum": 1},
                 "needs_reply": {"type": "boolean"},
+                "importance": {"type": "string", "enum": list(IMPORTANCE_VALUES)},
                 "deadline": {"type": ["string", "null"]},
                 "short_reason": {"type": "string"},
             },
-            "required": ["index", "category", "confidence", "needs_reply", "deadline", "short_reason"],
+            "required": ["index", "category", "confidence", "needs_reply", "importance", "deadline", "short_reason"],
             "additionalProperties": False,
         },
     }},

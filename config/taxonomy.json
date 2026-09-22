@@ -1,0 +1,18 @@
+{
+  "version": "1.0.0",
+  "target_primary_categories": "8-12",
+  "max_primary_categories": 12,
+  "categories": [
+    {"name": "ADMIN", "definition": "Account and routine administrative matters.", "positive_guidance": "Forms, account notices, routine paperwork.", "negative_guidance": "Use SECURITY for threats and FINANCE for money matters.", "active": true},
+    {"name": "FINANCE", "definition": "Bills, invoices, banking, and taxes.", "positive_guidance": "Payment requests, statements, tax documents.", "negative_guidance": "Use PURCHASE for order confirmations and receipts.", "active": true},
+    {"name": "PURCHASE", "definition": "Buying, orders, deliveries, and returns.", "positive_guidance": "Order confirmations, shipping, returns.", "negative_guidance": "Use FINANCE for standalone bills and banking.", "active": true},
+    {"name": "APPOINTMENT", "definition": "Scheduled meetings or bookings requiring calendar attention.", "positive_guidance": "Invitations, bookings, rescheduling.", "negative_guidance": "Use TRAVEL for transport or lodging itineraries.", "active": true},
+    {"name": "TRAVEL", "definition": "Trips, transportation, and lodging.", "positive_guidance": "Tickets, itineraries, hotel reservations.", "negative_guidance": "Use APPOINTMENT for ordinary meetings.", "active": true},
+    {"name": "PROFESSIONAL", "definition": "Work and career correspondence.", "positive_guidance": "Colleague requests, project updates, recruiting.", "negative_guidance": "Use ADMIN for routine account administration.", "active": true},
+    {"name": "PERSONAL", "definition": "Correspondence from personal contacts.", "positive_guidance": "Family, friends, and personal plans.", "negative_guidance": "Use PURCHASE or TRAVEL for transactional details.", "active": true},
+    {"name": "SECURITY", "definition": "Account access and security events.", "positive_guidance": "Login alerts, password resets, suspicious activity.", "negative_guidance": "Use ADMIN for ordinary account notices.", "active": true},
+    {"name": "NEWSLETTER", "definition": "Recurring editorial or promotional digests.", "positive_guidance": "Subscribed digests and roundups.", "negative_guidance": "Use NOTIFICATION for event-driven alerts.", "active": true},
+    {"name": "NOTIFICATION", "definition": "Automated event-driven updates.", "positive_guidance": "Status alerts and service notifications.", "negative_guidance": "Use NEWSLETTER for periodic digests.", "active": true},
+    {"name": "UNCERTAIN", "definition": "Insufficient evidence for a primary category.", "positive_guidance": "Use when available metadata does not support a confident choice.", "negative_guidance": "Do not use merely because a message needs a reply.", "active": true}
+  ]
+}

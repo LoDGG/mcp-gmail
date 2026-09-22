@@ -49,3 +49,17 @@ GMAIL_BACKEND=real GMAIL_LABEL_WRITES=0 uv run python -m gmail_agent.classify_cl
 ```
 
 The classifier forces real label writes off even if `GMAIL_LABEL_WRITES=1` is present in its environment. The CLI prints one concise classification per message, then model name, batch email count, input/output/total token counts when supplied by Gemini, and the Gemini request count. It makes one Gemini request per nonempty batch.
+
+## Local taxonomy learning
+
+`config/taxonomy.json` defines taxonomy version `1.0.0`, eleven active primary categories, category guidance, a target of 8–12 categories, and a hard cap of 12. The classifier now also predicts `importance` (`low`, `normal`, or `high`); `needs_reply` and `deadline` remain separate attributes. This changes the classifier's structured output contract, so classify new batches with the current code before saving them.
+
+Use `--save` to persist a dry-run batch to `.local/gmail_agent.db` (or set `GMAIL_AGENT_DB`, or pass `--db`). The SQLite history keeps message IDs, predictions, taxonomy versions, run timestamps, and human review decisions. It does not save subjects, snippets, or bodies. A run key and a unique run/message pair prevent duplicate entries when the same run is saved twice. The classifier remains dry-run even if the environment enables Gmail label writes.
+
+```bash
+GMAIL_BACKEND=real GMAIL_LABEL_WRITES=0 uv run python -m gmail_agent.classify_cli --query 'in:inbox newer_than:7d' --max-emails 10 --batch-size 10 --save
+uv run python -m gmail_agent.review_cli
+uv run python -m gmail_agent.taxonomy_stats
+```
+
+The review CLI shows one saved prediction at a time. Accept records the prediction as ground truth; correct records only changed fields; skip leaves it pending. Pending predictions are never ground truth. The stats command uses local SQLite data only and reports category distribution, UNCERTAIN and confidence distributions, correction and disagreement rates, confusion counts, and deterministic proposal candidates. Confidence is a model score, not measured accuracy. Candidate types are CREATE, MERGE, SPLIT, DEPRECATE, and REFINE_DEFINITION. Candidates do not modify the taxonomy; use `uv run python -m gmail_agent.taxonomy_stats --save-proposals` only if you want to keep candidate records for later review.
