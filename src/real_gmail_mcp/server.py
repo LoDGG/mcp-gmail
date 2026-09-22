@@ -1,6 +1,7 @@
-"""Read-only MCP surface for real Gmail."""
+"""Real Gmail MCP surface with explicitly opted-in label addition."""
 
 import logging
+import os
 from typing import TypedDict
 
 from mcp.server import MCPServer
@@ -30,9 +31,24 @@ class ThreadResult(TypedDict):
     messages: list[Email]
 
 
-def create_server(backend: RealGmailBackend | None = None) -> MCPServer:
-    backend = backend if backend is not None else RealGmailBackend()
-    server = MCPServer("real-gmail-readonly")
+class LabelResult(TypedDict):
+    message_id: str
+    label: str
+    label_id: str
+    labels: list[str]
+
+
+def _label_writes_enabled() -> bool:
+    value = os.environ.get("GMAIL_LABEL_WRITES", "0")
+    if value not in {"0", "1"}:
+        raise ValueError("GMAIL_LABEL_WRITES must be '0' or '1'")
+    return value == "1"
+
+
+def create_server(backend: RealGmailBackend | None = None, *, label_writes: bool | None = None) -> MCPServer:
+    label_writes = _label_writes_enabled() if label_writes is None else label_writes
+    backend = backend if backend is not None else RealGmailBackend(allow_label_writes=label_writes)
+    server = MCPServer("real-gmail")
 
     @server.tool()
     async def search_emails(query: str = "") -> SearchResult:
@@ -51,5 +67,12 @@ def create_server(backend: RealGmailBackend | None = None) -> MCPServer:
         """Read Gmail messages in one thread, including inline plain-text content."""
         logger.info("tool=get_thread")
         return {"messages": backend.get_thread(thread_id)}
+
+    if label_writes:
+        @server.tool()
+        async def apply_label(message_id: str, label: str) -> LabelResult:
+            """Add an existing user label by its exact name to one Gmail message."""
+            logger.info("tool=apply_label")
+            return backend.apply_label(message_id, label)
 
     return server

@@ -1,4 +1,4 @@
-"""Explicit desktop OAuth setup and read-only credential loading."""
+"""Explicit desktop OAuth setup and credential loading."""
 
 import os
 from pathlib import Path
@@ -7,8 +7,8 @@ from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 
-GMAIL_READONLY_SCOPE = "https://www.googleapis.com/auth/gmail.readonly"
-SCOPES = [GMAIL_READONLY_SCOPE]
+GMAIL_MODIFY_SCOPE = "https://www.googleapis.com/auth/gmail.modify"
+SCOPES = [GMAIL_MODIFY_SCOPE]
 
 
 def client_secret_path() -> Path:
@@ -42,9 +42,10 @@ def load_credentials() -> Credentials:
     path = token_path()
     if not path.is_file():
         raise FileNotFoundError("Gmail token is missing; run python -m real_gmail_mcp.oauth first")
-    credentials = Credentials.from_authorized_user_file(str(path), SCOPES)
+    # Passing SCOPES here would mask an older gmail.readonly token.
+    credentials = Credentials.from_authorized_user_file(str(path))
     if not credentials.has_scopes(SCOPES):
-        raise ValueError("Gmail token lacks the read-only scope")
+        raise ValueError("Gmail token lacks the gmail.modify scope; re-authorize locally")
     if not credentials.valid:
         if not credentials.expired or not credentials.refresh_token:
             raise ValueError("Gmail token is invalid; authorize again")

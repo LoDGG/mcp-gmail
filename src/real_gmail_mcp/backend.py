@@ -1,4 +1,4 @@
-"""Map read-only Gmail API responses to the fake MCP result shapes."""
+"""Map Gmail API responses to the MCP result shapes."""
 
 import base64
 from typing import Any
@@ -32,10 +32,11 @@ def _map_message(raw: dict[str, Any], *, include_body: bool) -> dict[str, Any]:
 
 
 class RealGmailBackend:
-    """Only exposes search and read operations. Inject a service in tests."""
+    """Read operations plus an explicitly gated existing-label addition."""
 
-    def __init__(self, service=None) -> None:
+    def __init__(self, service=None, *, allow_label_writes: bool = False) -> None:
         self._service = service if service is not None else build("gmail", "v1", credentials=load_credentials(), cache_discovery=False)
+        self.allow_label_writes = allow_label_writes
 
     def search_emails(self, query: str = "") -> list[dict[str, Any]]:
         if not isinstance(query, str):
@@ -56,3 +57,22 @@ class RealGmailBackend:
     def get_thread(self, thread_id: str) -> list[dict[str, Any]]:
         raw = self._service.users().threads().get(userId="me", id=thread_id, format="full").execute()
         return [_map_message(message, include_body=True) for message in raw.get("messages", [])]
+
+    def apply_label(self, message_id: str, label: str) -> dict[str, Any]:
+        if not self.allow_label_writes:
+            raise PermissionError("Real Gmail label writes are disabled")
+        if not isinstance(label, str) or not label or label != label.strip() or any(ord(char) < 32 for char in label):
+            raise ValueError("label must be a non-empty exact label name")
+        if label.upper() in {"INBOX", "SPAM", "TRASH", "UNREAD", "STARRED"}:
+            raise ValueError("System labels cannot be applied")
+        labels = self._service.users().labels().list(userId="me").execute().get("labels", [])
+        match = next((item for item in labels if item.get("name") == label), None)
+        if match is None:
+            raise ValueError("Unknown Gmail label")
+        if match.get("type") != "user":
+            raise ValueError("System labels cannot be applied")
+        label_id = match["id"]
+        updated = self._service.users().messages().modify(
+            userId="me", id=message_id, body={"addLabelIds": [label_id]}
+        ).execute()
+        return {"message_id": updated.get("id", message_id), "label": label, "label_id": label_id, "labels": updated.get("labelIds", [])}
