@@ -2,7 +2,7 @@
 
 import logging
 import os
-from typing import TypedDict
+from typing import NotRequired, TypedDict
 
 from mcp.server import MCPServer
 
@@ -17,6 +17,8 @@ class EmailMetadata(TypedDict):
     sender: str
     subject: str
     labels: list[str]
+    date: NotRequired[str]
+    snippet: NotRequired[str]
 
 
 class Email(EmailMetadata):

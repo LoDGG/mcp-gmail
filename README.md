@@ -33,3 +33,19 @@ GMAIL_BACKEND=real GMAIL_LABEL_WRITES=1 uv run python -m real_gmail_mcp.label_sm
 ```
 
 The sole OAuth scope is [`gmail.modify`](https://developers.google.com/workspace/gmail/api/auth/scopes). Gmail requires it for [`users.messages.modify`](https://developers.google.com/workspace/gmail/api/reference/rest/v1/users.messages/modify); it also covers the required read operations. This scope grants broader API authority than the application exposes, so the explicit tool surface and write opt-in are the application security boundary. Never commit credentials or tokens.
+
+## Batch classification dry run
+
+The separate classifier searches through the configured MCP backend, sends only message ID, sender, subject, and available date/snippet to Gemini, and validates one structured result per ID. It never fetches full bodies in its first pass or calls a Gmail mutation tool. The default batch size is 10; snippets are limited to 200 characters. An `UNCERTAIN` result stays unresolved. No automatic second pass runs.
+
+```bash
+uv run python -m gmail_agent.classify_cli --query invoice --batch-size 10
+```
+
+The CLI uses `GMAIL_BACKEND=fake` by default. Real Gmail requires an explicit query. For a later dry run of at most five recent inbox messages, with Gmail and Gemini credentials already set locally:
+
+```bash
+GMAIL_BACKEND=real GMAIL_LABEL_WRITES=0 uv run python -m gmail_agent.classify_cli --query 'in:inbox newer_than:7d' --max-emails 5 --batch-size 5
+```
+
+The classifier forces real label writes off even if `GMAIL_LABEL_WRITES=1` is present in its environment. The CLI prints one concise classification per message, then model name, batch email count, input/output/total token counts when supplied by Gemini, and the Gemini request count. It makes one Gemini request per nonempty batch.

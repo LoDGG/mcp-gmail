@@ -28,6 +28,9 @@ def _map_message(raw: dict[str, Any], *, include_body: bool) -> dict[str, Any]:
     }
     if include_body:
         message["body"] = _text_body(raw.get("payload", {}))
+    else:
+        message["date"] = headers.get("date", "")
+        message["snippet"] = raw.get("snippet", "")
     return message
 
 
@@ -47,7 +50,7 @@ class RealGmailBackend:
     def _get_message(self, message_id: str, *, include_body: bool) -> dict[str, Any]:
         raw = self._service.users().messages().get(
             userId="me", id=message_id, format="full" if include_body else "metadata",
-            **({} if include_body else {"metadataHeaders": ["From", "Subject"]}),
+            **({} if include_body else {"metadataHeaders": ["From", "Subject", "Date"]}),
         ).execute()
         return _map_message(raw, include_body=include_body)
 
