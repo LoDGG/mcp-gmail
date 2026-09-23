@@ -88,9 +88,9 @@ The VPS must have these private files in the repository:
 
 - `.secrets/client_secret.json`
 - `.secrets/gmail_token.json` (authorized locally first; the VPS does not run browser OAuth)
-- `.secrets/gemini.env`, with exactly one unquoted `GEMINI_API_KEY=...` assignment
+- `.secrets/gemini.env`, with a `GEMINI_API_KEY=...` assignment (single or double quotes are accepted)
 
-`.secrets/` and `.local/` are Git ignored. Never put secret values in systemd units. On the VPS, run `chmod 700 .secrets` and `chmod 600 .secrets/*` after transfer. The wrapper reads the key file as data and does not print it.
+`.secrets/` and `.local/` are Git ignored. Never put secret values in systemd units. On the VPS, run `chmod 700 .secrets` and `chmod 600 .secrets/*` after transfer. The wrapper sources this private shell file as the deployment user, so keep only trusted assignments in it. It clears inherited `GEMINI_API_KEY` before loading the file, removes `GOOGLE_API_KEY`, and never prints either key.
 
 ### Copy code and secrets from WSL
 
@@ -128,18 +128,19 @@ The last command is a manual dry run: it uses live APIs for at most five emails,
 
 ### Install the systemd timer on the VPS
 
-The service template has `@RUN_USER@` and `@REPO_ROOT@` placeholders. Render them for the chosen deployment account and absolute path, then install the timer:
+Render the service template for the current deployment account and absolute repository path. The renderer rejects unsupported characters and unresolved placeholders:
 
 ```bash
 cd "$REPO_DIR"
-RUN_USER="$(id -un)"
-sed -e "s|@RUN_USER@|$RUN_USER|g" -e "s|@REPO_ROOT@|$REPO_DIR|g" deploy/systemd/gmail-agent-triage.service | sudo tee /etc/systemd/system/gmail-agent-triage.service >/dev/null
+python3 scripts/render_systemd.py --output /tmp/gmail-agent-triage.service
+sudo install -m 0644 /tmp/gmail-agent-triage.service /etc/systemd/system/gmail-agent-triage.service
 sudo install -m 0644 deploy/systemd/gmail-agent-triage.timer /etc/systemd/system/gmail-agent-triage.timer
+rm /tmp/gmail-agent-triage.service
 sudo systemctl daemon-reload
 sudo systemctl enable --now gmail-agent-triage.timer
 ```
 
-The timer starts ten minutes after boot and then approximately every six hours after each service activation. `Persistent=true` applies to calendar timers, not this `OnBootSec`/`OnUnitActiveSec` schedule; the boot trigger provides the post-reboot run.
+The timer starts ten minutes after boot and then approximately every six hours after each service activation. It includes `Persistent=true`; the boot trigger provides the post-reboot run for this monotonic schedule.
 
 Inspect status and logs, or deliberately trigger one service execution:
 

@@ -32,19 +32,21 @@ if [[ ! -r "$secret_env" ]]; then
     printf 'Missing readable .secrets/gemini.env\n' >&2
     exit 1
 fi
-# Read the one expected assignment as data, without executing shell code.
-gemini_key=""
-while IFS= read -r line || [[ -n "${line:-}" ]]; do
-    case "$line" in
-        GEMINI_API_KEY=*) gemini_key="${line#GEMINI_API_KEY=}" ;;
-    esac
-done < "$secret_env"
-if [[ -z "$gemini_key" ]]; then
+# This is a private, trusted shell env file. Source it as the deployment user so
+# ordinary quoted assignments are interpreted exactly as in a manual run.
+unset GEMINI_API_KEY GOOGLE_API_KEY
+set -a
+if ! source "$secret_env" >/dev/null 2>&1; then
+    printf 'Could not load .secrets/gemini.env\n' >&2
+    exit 1
+fi
+set +x
+set +a
+unset GOOGLE_API_KEY
+if [[ -z "${GEMINI_API_KEY:-}" ]]; then
     printf 'GEMINI_API_KEY is missing from .secrets/gemini.env\n' >&2
     exit 1
 fi
-export GEMINI_API_KEY="$gemini_key"
-unset gemini_key line
 
 if [[ -n "${HOME:-}" ]]; then
     export PATH="$HOME/.local/bin:$PATH"
