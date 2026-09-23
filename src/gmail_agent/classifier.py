@@ -7,6 +7,7 @@ from typing import Any, Callable, Protocol
 from jsonschema import ValidationError, validate
 
 from gmail_agent.core import ToolCall
+from gmail_agent.subtypes import SUBTYPE_HINT_SCHEMA, validate_subtype_hint
 from gmail_agent.mcp_client import GmailMCPClient
 from gmail_agent.taxonomy import IMPORTANCE_VALUES, load_taxonomy
 
@@ -23,13 +24,14 @@ CLASSIFICATION_SCHEMA = {
             "properties": {
                 "index": {"type": "integer", "minimum": 0},
                 "category": {"type": "string", "enum": list(CATEGORIES)},
+                "subtype_hint": SUBTYPE_HINT_SCHEMA,
                 "confidence": {"type": "number", "minimum": 0, "maximum": 1},
                 "needs_reply": {"type": "boolean"},
                 "importance": {"type": "string", "enum": list(IMPORTANCE_VALUES)},
                 "deadline": {"type": ["string", "null"]},
                 "short_reason": {"type": "string"},
             },
-            "required": ["index", "category", "confidence", "needs_reply", "importance", "deadline", "short_reason"],
+            "required": ["index", "category", "subtype_hint", "confidence", "needs_reply", "importance", "deadline", "short_reason"],
             "additionalProperties": False,
         },
     }},
@@ -75,6 +77,8 @@ def parse_results(text: str, expected_ids: list[str]) -> list[dict[str, Any]]:
     try:
         parsed = json.loads(text)
         validate(parsed, CLASSIFICATION_SCHEMA)
+        for item in parsed["results"]:
+            validate_subtype_hint(item["subtype_hint"], item["category"])
     except (ValueError, ValidationError) as exc:
         raise ClassificationError("Invalid classification response") from exc
     results = parsed["results"]

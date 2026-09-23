@@ -54,7 +54,7 @@ class Model:
             category, confidence = self.choices.get(email["index"], ("FINANCE", 0.95))
             results.append({
                 "index": email["index"], "category": category, "confidence": confidence,
-                "needs_reply": False, "importance": "normal", "deadline": None, "short_reason": "Brief",
+                "needs_reply": False, "importance": "normal", "deadline": None, "subtype_hint": None, "short_reason": "Brief",
             })
         return BatchResponse(json.dumps({"results": results}), Usage("fake", 10, 5, 17, 2))
 

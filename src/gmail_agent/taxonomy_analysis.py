@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from gmail_agent.history import ground_truth
 from gmail_agent.taxonomy import Taxonomy
 
+DEFAULT_SUBTYPE_MIN_MESSAGES = 3
+
 PROPOSAL_TYPES = {"CREATE", "MERGE", "SPLIT", "DEPRECATE", "REFINE_DEFINITION"}
 
 
@@ -24,7 +26,41 @@ class Proposal:
             raise ValueError("Invalid proposal type or status")
 
 
-def calculate_stats(rows: list[dict]) -> dict:
+def recurring_subtypes(rows: list[dict], *, min_messages: int = DEFAULT_SUBTYPE_MIN_MESSAGES) -> list[dict]:
+    """Unverified hints, grouped by reviewed category when available.
+
+    Count each message once: prefer its latest reviewed record, otherwise its
+    latest prediction. HistoryDB supplies records in ascending ID order.
+    """
+    if isinstance(min_messages, bool) or not isinstance(min_messages, int) or min_messages < 1:
+        raise ValueError("subtype minimum messages must be a positive integer")
+    selected = {}
+    for row in rows:
+        previous = selected.get(row["message_id"])
+        if previous is None or ground_truth(row) is not None or ground_truth(previous) is None:
+            selected[row["message_id"]] = row
+    counts = Counter()
+    reviewed_counts = Counter()
+    for row in selected.values():
+        hint = row.get("subtype_hint")
+        if hint is None:
+            continue
+        truth = ground_truth(row)
+        category = truth["category"] if truth is not None else row["predicted_category"]
+        key = (category, hint)
+        counts[key] += 1
+        reviewed_counts[key] += int(truth is not None)
+    return [
+        {"category": category, "subtype_hint": hint, "distinct_messages": count,
+         "reviewed_category_messages": reviewed_counts[(category, hint)],
+         "unreviewed_category_messages": count - reviewed_counts[(category, hint)],
+         "hint_status": "unverified"}
+        for (category, hint), count in sorted(counts.items())
+        if count >= min_messages
+    ]
+
+
+def calculate_stats(rows: list[dict], *, subtype_min_messages: int = DEFAULT_SUBTYPE_MIN_MESSAGES) -> dict:
     reviewed = [row for row in rows if ground_truth(row) is not None]
     corrected = [row for row in reviewed if row["review_status"] == "corrected"]
     distribution = Counter(row["predicted_category"] for row in rows)
@@ -44,6 +80,8 @@ def calculate_stats(rows: list[dict]) -> dict:
     return {
         "classified_emails": len({row["message_id"] for row in rows}),
         "classification_records": len(rows),
+        "subtype_min_messages": subtype_min_messages,
+        "subtype_candidates": recurring_subtypes(rows, min_messages=subtype_min_messages),
         "reviewed": reviewed_count,
         "category_distribution": dict(distribution),
         "uncertain_rate": distribution["UNCERTAIN"] / len(rows) if rows else 0.0,

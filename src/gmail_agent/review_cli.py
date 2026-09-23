@@ -27,6 +27,7 @@ def main() -> None:
             row = pending[0]
             print(f"\nMessage {row['message_id']} | taxonomy {row['taxonomy_version']}")
             print(f"Predicted {row['predicted_category']} ({row['predicted_confidence']:.2f}), reply={bool(row['predicted_needs_reply'])}, importance={row['predicted_importance']}, deadline={row['predicted_deadline'] or '-'}")
+            print(f"Subtype hint (unverified): {row['subtype_hint'] or '-'}")
             print(f"Reason: {row['short_reason']}")
             action = input("[a]ccept, [c]orrect, [s]kip, [q]uit: ").strip().lower()
             if action == "q":

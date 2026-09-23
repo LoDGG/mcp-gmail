@@ -51,7 +51,7 @@ class FakeBatchProvider:
         self.batches.append(emails)
         results = [
             {"index": email["index"], "category": CATEGORIES[email["index"] % len(CATEGORIES)],
-             "confidence": 0.8, "needs_reply": False, "importance": "normal", "deadline": None, "short_reason": "Brief reason"}
+             "confidence": 0.8, "needs_reply": False, "importance": "normal", "deadline": None, "subtype_hint": None, "short_reason": "Brief reason"}
             for email in emails
         ]
         return BatchResponse(json.dumps({"results": results}), Usage("fake-model", 12, 8, 20))
@@ -98,7 +98,7 @@ def test_compact_real_metadata_truncates_snippet_and_omits_irrelevant_fields():
 
 def test_result_validation_rejects_malformed_incomplete_and_wrong_indices():
     good = {"index": 0, "category": "UNCERTAIN", "confidence": 0.5,
-            "needs_reply": False, "importance": "normal", "deadline": None, "short_reason": "Not enough context"}
+            "needs_reply": False, "importance": "normal", "deadline": None, "subtype_hint": None, "short_reason": "Not enough context"}
     assert parse_results(json.dumps({"results": [good]}), ["m-0"]) == [
         {"message_id": "m-0", **{key: value for key, value in good.items() if key != "index"}}
     ]
@@ -116,13 +116,13 @@ def test_result_validation_rejects_malformed_incomplete_and_wrong_indices():
 def test_all_taxonomy_categories_are_valid_classification_results():
     for category in CATEGORIES:
         item = {"index": 0, "category": category, "confidence": 0.5,
-                "needs_reply": False, "importance": "normal", "deadline": None, "short_reason": "Brief"}
+                "needs_reply": False, "importance": "normal", "deadline": None, "subtype_hint": None, "short_reason": "Brief"}
         assert parse_results(json.dumps({"results": [item]}), ["m-0"])[0]["category"] == category
 
 
 def test_reordered_indices_remap_to_original_message_ids():
     base = {"category": "UNCERTAIN", "confidence": 0.5, "needs_reply": False, "importance": "normal",
-            "deadline": None, "short_reason": "Brief"}
+            "deadline": None, "subtype_hint": None, "short_reason": "Brief"}
     results = [{"index": 2, **base}, {"index": 0, **base}, {"index": 1, **base}]
     mapped = parse_results(json.dumps({"results": results}), ["opaque-A", "opaque-B", "opaque-C"])
     assert [item["message_id"] for item in mapped] == ["opaque-A", "opaque-B", "opaque-C"]
@@ -132,7 +132,7 @@ def test_reordered_indices_remap_to_original_message_ids():
 @pytest.mark.parametrize("indices", [[0, 0, 2], [0, 2], [0, 1, 3]])
 def test_duplicate_missing_or_unknown_index_rejected(indices):
     results = [{"index": index, "category": "UNCERTAIN", "confidence": 0.5,
-                "needs_reply": False, "importance": "normal", "deadline": None, "short_reason": "Brief"} for index in indices]
+                "needs_reply": False, "importance": "normal", "deadline": None, "subtype_hint": None, "short_reason": "Brief"} for index in indices]
     with pytest.raises(ClassificationError, match="indices"):
         parse_results(json.dumps({"results": results}), ["opaque-A", "opaque-B", "opaque-C"])
 
@@ -164,5 +164,10 @@ async def test_gemini_structured_output_and_usage_mapping_without_network():
     assert request["config"].tools is None
     assert request["config"].automatic_function_calling.disable is True
     assert request["config"].thinking_config.thinking_level == types.ThinkingLevel.MINIMAL
+    assert "subtype_hint" in request["contents"]
+    assert "lowercase snake_case" in request["contents"]
+    assert "maximum 40 characters" in request["contents"]
+    assert "not a Gmail label" in request["contents"]
+    assert "subtype_hint" in request["config"].response_json_schema["properties"]["results"]["items"]["required"]
     assert "message_id" not in request["contents"]
     assert response.usage == Usage("gemini-3.6-flash", 15, 7, 25)

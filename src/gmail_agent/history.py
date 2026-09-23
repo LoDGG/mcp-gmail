@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
+from gmail_agent.subtypes import validate_subtype_hint
 from gmail_agent.taxonomy import IMPORTANCE_VALUES, Taxonomy, load_taxonomy
 
 DEFAULT_DB_PATH = Path(".local/gmail_agent.db")
@@ -55,6 +56,7 @@ class HistoryDB:
                     predicted_needs_reply INTEGER NOT NULL CHECK(predicted_needs_reply IN (0, 1)),
                     predicted_importance TEXT NOT NULL CHECK(predicted_importance IN ('low', 'normal', 'high')),
                     predicted_deadline TEXT,
+                    subtype_hint TEXT,
                     short_reason TEXT NOT NULL,
                     review_status TEXT NOT NULL DEFAULT 'pending' CHECK(review_status IN ('pending', 'accepted', 'corrected')),
                     reviewed_at TEXT,
@@ -79,12 +81,18 @@ class HistoryDB:
                 );
             """)
 
+            columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(classifications)")}
+            if "subtype_hint" not in columns:
+                # Additive migration preserves records, reviews, IDs, and constraints.
+                self.conn.execute("ALTER TABLE classifications ADD COLUMN subtype_hint TEXT")
+
     def save_run(self, results: list[dict], taxonomy: Taxonomy | None = None, *, run_key: str | None = None) -> str:
         taxonomy = taxonomy or load_taxonomy()
         run_key = run_key or str(uuid4())
         if len({item["message_id"] for item in results}) != len(results):
             raise ValueError("Duplicate message ID in classification run")
         for item in results:
+            validate_subtype_hint(item.get("subtype_hint"), item["category"])
             if item["category"] not in taxonomy.active_names or item["importance"] not in IMPORTANCE_VALUES:
                 raise ValueError("Classification does not match active taxonomy")
             if not 0 <= item["confidence"] <= 1 or not isinstance(item["needs_reply"], bool):
@@ -104,12 +112,12 @@ class HistoryDB:
                     INSERT OR IGNORE INTO classifications (
                         run_id, message_id, classified_at, taxonomy_version, predicted_category,
                         predicted_confidence, predicted_needs_reply, predicted_importance,
-                        predicted_deadline, short_reason
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        predicted_deadline, short_reason, subtype_hint
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     run_id, item["message_id"], timestamp, taxonomy.version, item["category"],
                     item["confidence"], int(item["needs_reply"]), item["importance"],
-                    item["deadline"], item["short_reason"],
+                    item["deadline"], item["short_reason"], item.get("subtype_hint"),
                 ))
         return run_key
 

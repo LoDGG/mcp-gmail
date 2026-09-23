@@ -2,11 +2,11 @@
 
 ## Project Structure & Module Organization
 
-This repository is currently an empty scaffold: it has no application source, tests, assets, or package manifest. Keep new code in a clearly named source directory, such as `src/`, and place tests in `tests/` or alongside the code they cover. Add configuration and documentation at the repository root only when they apply to the whole project. Update this guide once the project layout is established.
+Application code lives in `src/gmail_agent/`, with fake and real Gmail MCP backends in `src/fake_gmail_mcp/` and `src/real_gmail_mcp/`. Tests live in `tests/`; static taxonomy and label mappings live in `config/`. Runtime scripts are in `scripts/` and systemd templates in `deploy/systemd/`. Keep project-wide configuration and documentation at the root.
 
 ## Build, Test, and Development Commands
 
-No build, test, or local run commands are configured yet. When adding a toolchain, document its setup and exact commands in the README and expose repeatable scripts through its standard entry point (for example, `package.json` scripts for a Node.js project). Run the relevant build and test commands before opening a pull request.
+Use Python 3.12+ and `uv sync --locked` to set up dependencies. Run the full suite with `uv run pytest -q` (or `.venv/bin/python -m pytest -q` in the existing environment). Local commands and runtime setup are documented in README.md. Run relevant checks before opening a pull request.
 
 ## Coding Style & Naming Conventions
 
@@ -14,7 +14,7 @@ Follow the conventions of the language and formatter chosen for each new module.
 
 ## Testing Guidelines
 
-There is no test framework or coverage target yet. Add tests with each behavior change and name them after the behavior they verify. Document the test command and any required fixtures or services when the first test suite is introduced. Keep tests deterministic and independent of personal credentials.
+Use pytest and local fakes for Gemini and Gmail. Add deterministic tests for behavior changes, including persistence migrations and mutation safety. Tests must not depend on personal credentials or live services. No coverage target is configured.
 
 ## Commit & Pull Request Guidelines
 

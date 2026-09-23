@@ -30,7 +30,7 @@ def response(text=None):
     if text is None:
         text = json.dumps({"results": [{
             "index": 0, "category": "FINANCE", "confidence": 0.95,
-            "needs_reply": False, "importance": "normal", "deadline": None,
+            "needs_reply": False, "importance": "normal", "deadline": None, "subtype_hint": None,
             "short_reason": "Brief",
         }]})
     return types.GenerateContentResponse(candidates=[
