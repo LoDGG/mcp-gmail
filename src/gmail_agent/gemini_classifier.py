@@ -8,14 +8,19 @@ from collections.abc import Awaitable, Callable
 from google import genai
 from google.genai import errors, types
 
-from gmail_agent.classifier import BatchResponse, CLASSIFICATION_SCHEMA, Usage
+from gmail_agent.classifier import (
+    BatchResponse, CLASSIFIER_PROMPT_VERSION, Usage, build_classification_schema,
+)
+from gmail_agent.provenance import PredictionProvenance
+from gmail_agent.taxonomy import Taxonomy, load_taxonomy
 
 
 class GeminiBatchClassifier:
     def __init__(
         self, client: genai.Client | None = None,
-        *, sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        *, sleep: Callable[[float], Awaitable[None]] = asyncio.sleep, taxonomy: Taxonomy | None = None,
     ) -> None:
+        self.taxonomy = taxonomy or load_taxonomy()
         self.model = os.environ.get("GEMINI_MODEL", "gemini-3.6-flash")
         if client is None:
             key = os.environ.get("GEMINI_API_KEY")
@@ -40,9 +45,15 @@ class GeminiBatchClassifier:
             "This hint is non-binding, is not a Gmail label, and must not change the primary category.\n"
             + json.dumps(emails, ensure_ascii=False, separators=(",", ":"))
         )
+        added_categories = [
+            {key: category[key] for key in ("name", "definition", "positive_guidance", "negative_guidance")}
+            for category in self.taxonomy.categories if category["active"] and category.get("activation_id")
+        ]
+        if added_categories:
+            prompt += "\nAdditional human-approved category guidance:\n" + json.dumps(added_categories, ensure_ascii=False)
         config = types.GenerateContentConfig(
             response_mime_type="application/json",
-            response_json_schema=CLASSIFICATION_SCHEMA,
+            response_json_schema=build_classification_schema(self.taxonomy),
             automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
             thinking_config=types.ThinkingConfig(thinking_level=types.ThinkingLevel.MINIMAL),
             # Keep SDK retries from multiplying our three-attempt budget.
@@ -74,4 +85,9 @@ class GeminiBatchClassifier:
                 getattr(metadata, "thoughts_token_count", None),
             ),
             request_count=attempt + 1,
+            provenance=PredictionProvenance(
+                provider_id="gemini", model_id=self.model,
+                taxonomy_version=self.taxonomy.version,
+                prompt_version=CLASSIFIER_PROMPT_VERSION,
+            ),
         )

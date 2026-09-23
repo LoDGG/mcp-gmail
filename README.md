@@ -70,6 +70,18 @@ History databases automatically receive a nullable `subtype_hint` column on open
 
 Taxonomy stats include unverified `subtype_candidates`, grouped by primary category with counts of distinct messages and reviewed/unreviewed category evidence. The default minimum is three distinct messages; configure it with `uv run python -m gmail_agent.taxonomy_stats --subtype-min-messages 5`. Each message contributes its latest reviewed record, or its latest prediction if never reviewed. Human category corrections take precedence in grouping. Null hints and groups below the threshold are omitted. These exploratory candidates do not change taxonomy files, generate new primary-category proposals, or create Gmail labels.
 
+### Prediction provenance
+
+New Gemini classification runs record `provider_id=gemini`, the configured `GEMINI_MODEL` (default `gemini-3.6-flash`), the version loaded from the taxonomy configuration used by the classifier schema, and `prompt_version=classifier-v2`. Version v2 adds loading of activated categories and their human-written guidance; existing category instructions remain unchanged. Historical classifier-v1 provenance is retained. Bump `CLASSIFIER_PROMPT_VERSION` only when instructions or output semantics materially change; model switches, retries, and operational changes do not require a prompt-version bump.
+
+Provider/model/prompt metadata lives once on `classification_runs`; predictions reference it through `run_id`. Existing taxonomy-version columns are retained. `HistoryDB.records()` joins run provenance into prediction records. The provider-neutral `PredictionProvenance` value passes from batch responses through classification reports to `save_run(..., provenance=...)`; future providers can supply their own identifiers. Batches with different provenance cannot silently share one run, and an existing run key cannot be reused with different metadata.
+
+The additive migration leaves unknown historical provider/model/prompt values null and retains stored taxonomy versions. It never guesses metadata from timestamps or rewrites predictions or reviews.
+
+Taxonomy stats always include `performance_by_provenance`, grouped by all four identifiers. Each group reports prediction count, reviewed count, category-correction count/rate, subtype-reviewed count, and subtype acceptance/correction/rejection rates. Category rates use primary-reviewed observations; subtype rates use subtype-reviewed observations. Rates are null when the corresponding reviewed sample is empty. Overall statistics are explicitly marked as combined across provenance groups.
+
+Human corrections and approved subtype evidence remain independent of provider/model: new predictions for a previously reviewed message do not overwrite that review or reset its approved subtype knowledge. Each model output is a separate observation. Grouped performance uses explicit reviews of those observations; a new model's prediction is not automatically marked reviewed merely because another observation of that message has a review.
+
 ### Fast local review
 
 ```bash
@@ -78,12 +90,14 @@ uv run python -m gmail_agent.review_cli --db .local/gmail_agent.db --limit 50
 uv run python -m gmail_agent.taxonomy_stats --subtype-min-messages 3
 ```
 
-The default queue includes pending primary reviews and remaining subtype reviews where a model hint exists. `--limit` caps items shown, including skips; `--all` also displays completed records without allowing saved decisions to be overwritten. Older records need no API lookup and show unavailable headers.
+The default queue includes pending primary reviews and remaining subtype reviews where a model hint exists. NEW LABEL and ACCEPT PROPOSED LABEL finish the primary review and are omitted from this queue. `--limit` caps items shown, including skips; `--all` also displays completed records without allowing saved decisions to be overwritten. Older records need no API lookup and show unavailable headers.
 
 Use one command per item:
 
 - `a` / `accept`: accept primary prediction attributes; leave subtype undecided.
 - `c ADMIN` / `correct ADMIN`: correct the primary category. Bare `c` asks only for the category. Valid categories appear once at startup.
+- `n job_offer` or `n job_offer "Offre"`: propose a new label because existing categories are insufficient; no separate acceptance or gap action is needed.
+- `p`: accept the displayed strong new-label suggestion. This action is shown only when a qualifying suggestion exists.
 - `s` / `skip`: leave unchanged for a later session.
 - `q` / `quit`: stop; completed decisions are already saved.
 - `sa`: accept the model subtype; `sr`: reject it; `sc account_notice`: supply a corrected subtype. These can be used independently or appended to a primary action, such as `a sa` or `c ADMIN sc account_notice`.
@@ -92,9 +106,60 @@ Corrected hints must be lowercase snake_case, at most 40 characters, and must no
 
 Stats report primary reviewed count, accepted-category rate and category-correction rate (denominator: primary-reviewed records), separate subtype decision counts, and model subtype disagreement counts/rate (rejected or corrected decisions divided by subtype-reviewed records). Non-category attribute corrections still count as category agreement. Human-approved subtype candidates require both category ground truth and an accepted/corrected subtype; they use the configured distinct-message threshold and the latest explicit subtype decision per message. These are separate from exploratory unverified model hints. Review and stats use local SQLite only, never call Gemini/Gmail, never modify Gmail labels, and never change taxonomy files.
 
+### Conservative new-label suggestions
+
+The primary actions are mutually exclusive: accept the category, correct to another existing category, propose a new label, or accept a strong proposed label. NEW LABEL and ACCEPT PROPOSED LABEL record taxonomy insufficiency, not a model category error. They leave category ground truth unset and cannot be combined with category acceptance/correction. Original predictions, subtype decisions, and provenance remain intact. Existing optional subtype review commands are still available; there is no separate taxonomy-gap action.
+
+Suggestions are deterministic and local. They group normalized semantic concepts, count distinct messages once, and prefer reviewed subtypes over later raw guesses. Sender display names/case do not create extra sender evidence; repeated observations of the same email do not create extra message or human-confirmation evidence. The defaults require either:
+
+- Human support: at least 3 distinct messages, 2 distinct human-confirmed messages (approved/corrected subtype or explicit label proposal), and score 15.
+- Model recurrence: at least 8 distinct messages, 3 known distinct sender addresses, 2 classification runs, and score 13. Missing sender metadata does not satisfy the sender requirement.
+
+The inspectable score is `raw_messages + 5*human_confirmed_messages + 2*manual_proposal_messages + 2*category_correction_messages + min(senders,3) + min(runs,2)`. A message with both an approved subtype and a manual proposal counts once toward the human-confirmation threshold. Counts and score appear with each suggestion.
+
+Recurrence alone is insufficient. Local fit evidence must include a manual new-label signal, repeated corrections split across multiple existing categories, or at least 75% catch-all NOTIFICATION/UNCERTAIN placement (minimum two messages). Two human acceptances in an existing category, or two corrections consistently pointing to one existing category, suppress a suggestion unless humans explicitly proposed a new label. Exact category names, common category synonyms, trivial category variants, source-only email names, dated concepts, and overly specific multiword concepts are suppressed. This is a deliberately limited lexical/evidence heuristic, not an LLM semantic judgment; final taxonomy approval still requires human inspection.
+
+All thresholds are configurable through `SuggestionPolicy` and CLI options such as `--label-human-min-messages 4`, `--label-human-min-confirmations 3`, `--label-model-min-messages 12`, `--label-model-min-senders 4`, `--label-model-min-runs 3`, `--label-human-min-score 20`, and `--label-model-min-score 17`.
+
+Manual `n` works immediately below recurrence thresholds. It normalizes the concept key (including a small explicit alias map), rejects names already represented by an existing category, and creates or strengthens one pending CREATE candidate. A strong suggestion matching a pending manual candidate reuses that candidate rather than creating a duplicate. Legacy named CREATE proposals and resolved candidates suppress redundant suggestions. After `p`, the candidate is marked ready for later taxonomy approval and stops being suggested; its status remains `proposed`, not applied. Display names are optional human text; otherwise the concept is displayed in readable words.
+
+The additive migration adds `primary_review_action` to classifications, concept/display/update/readiness fields to `taxonomy_proposals`, and `taxonomy_proposal_support` for message IDs, classification references, evidence sources, optional display names, and timestamps. A unique concept index prevents duplicate named CREATE candidates. Existing reviews and legacy proposals are not rewritten. NEW LABEL leaves `review_status` (the category-review status) pending but records a completed primary action; review queues account for this separately.
+
+`taxonomy_stats` exposes taxonomy-insufficiency counts separately from category correction rates, plus stored CREATE candidates with evidence and approval readiness. Approval snapshots record raw/human subtype and category-correction support as well as the explicit human approval, so the evidence is inspectable later. Neither displaying nor accepting a suggestion changes taxonomy.json, Gmail labels, or Processed/Review behavior. No API calls occur during review.
+
+### Explicit activation of an approved CREATE proposal
+
+Review commands `n` and `p` remain local. A separate activation command requires persisted human approval evidence. Merely recurring subtype hints, automatic proposals, or displayed suggestions are never eligible. List candidates or preview an activation without contacting Gmail:
+
+```bash
+uv run python -m gmail_agent.taxonomy_apply_cli --list
+uv run python -m gmail_agent.taxonomy_apply_cli --proposal job_offer \
+  --definition "Direct job offers and concrete employment opportunities requiring consideration."
+```
+
+If a manual proposal has no display name, also pass `--display-label "Offre"`. First activation requires a human-written definition; the existing proposal rationale is not sufficient to invent one. The same prepared request can later be explicitly applied:
+
+```bash
+GMAIL_LABEL_WRITES=1 uv run python -m gmail_agent.taxonomy_apply_cli \
+  --proposal job_offer --apply \
+  --definition "Direct job offers and concrete employment opportunities requiring consideration."
+```
+
+The apply command makes Gmail label API calls and modifies local taxonomy configuration; run it only when deliberately activating a reviewed proposal. Both `--apply` and `GMAIL_LABEL_WRITES=1` are mandatory. Without `--apply`, it is a local dry run even when the environment permits writes. `--db`, `--taxonomy`, and `--label-map` select explicit local paths for development/testing.
+
+Activation first validates human approval, normalized concept (maximum 40 characters), deterministic uppercase category ID, exact printable display name (maximum 80 characters), definition, conflicts, and the configured category cap. Reserved Gmail/system names and conflicting category/label names are rejected. Gmail labels are then listed: an exact USER label is reused, otherwise only the single approved label is created. Case-conflicting user labels and returned system labels are rejected. No messages are relabeled and no unrelated label is renamed or deleted.
+
+The new taxonomy entry preserves existing schema conventions and adds `concept_key`, `gmail_label`, and an `activation_id` recovery marker. For example, `job_offer` becomes `JOB_OFFER` with `gmail_label: "Offre"`. Existing category objects and `config/gmail_labels.json` remain unchanged. The loader combines built-in mappings with activated mappings; UNCERTAIN still routes to Review. A category addition increments the semantic minor version and resets patch to zero (for example, 1.0.0 → 1.1.0). The configured maximum still applies, including UNCERTAIN as in the existing loader.
+
+A new additive `taxonomy_activations` SQLite table records proposal/category/display identity, Gmail label ID, human approval time, activation time, target taxonomy version, definition/guidance snapshot, status, and failure details. The lifecycle is human-approved (derived from stored manual/proposal acceptance evidence), activating, then active or failed. On success the CREATE proposal becomes accepted. Historical predictions, reviews, and provenance are never rewritten.
+
+A nonblocking file lock serializes activations of the same taxonomy file. The update uses a temporary file in the same directory, flush/fsync, an original-content check, atomic replace, and directory fsync. Gmail and the filesystem/SQLite cannot form one transaction: if Gmail creation succeeds but a later step fails, the label is retained and the error reports the partial state. Retry the same `--proposal ... --apply`; saved definition/display metadata is reused, Gmail listing avoids duplicate creation, and the activation marker avoids duplicate categories/version increments after an interrupted final audit write. An already active proposal is a no-op. Resolved conflicts or a changed/missing active category require explicit inspection; recovery never silently overwrites them.
+
+New classifier instances build the category enum and added-category guidance from the current taxonomy. Parsing, persistence provenance, and triage use that taxonomy snapshot. Existing primary-category definitions, confidence threshold, Processed/Review logic, model selection, and timer schedule are unchanged.
+
 ## Safe automatic triage
 
-`config/gmail_labels.json` fixes the triage labels: ADMIN→Admin, FINANCE→Billing, PURCHASE→Purchase, APPOINTMENT→Appointment, TRAVEL→Journeys, PROFESSIONAL→Professional, PERSONAL→Personal, SECURITY→Security, NEWSLETTER→Newsletter, NOTIFICATION→Notification, plus Review and Processed. Internal taxonomy names and saved history are unchanged. No `AI/` prefix is used. In `--apply` mode, triage lists existing Gmail user labels, creates only missing names from this static allowlist, and resolves their Gmail IDs before it asks Gemini to classify. If Gmail rejects a configured name, triage reports that exact name and stops before classification or message labeling. Model output never supplies a label name or controls creation. Repeated runs reuse existing labels; no labels are renamed or deleted. Dry-run mode creates nothing.
+`config/gmail_labels.json` fixes the triage labels: ADMIN→Admin, FINANCE→Billing, PURCHASE→Purchase, APPOINTMENT→Appointment, TRAVEL→Journeys, PROFESSIONAL→Professional, PERSONAL→Personal, SECURITY→Security, NEWSLETTER→Newsletter, NOTIFICATION→Notification, plus Review and Processed. Internal taxonomy names and saved history are unchanged. No `AI/` prefix is used. In `--apply` mode, triage lists existing Gmail user labels, creates only missing names from the built-in mapping plus activated taxonomy mappings, and resolves their Gmail IDs before it asks Gemini to classify. If Gmail rejects a configured name, triage reports that exact name and stops before classification or message labeling. Model output never supplies a label name or controls creation. Repeated runs reuse existing labels; no labels are renamed or deleted. Dry-run mode creates nothing.
 
 The default query is `in:inbox -label:"Processed" newer_than:14d`, with batch size 10 and a maximum of 10 emails. An empty result makes no Gemini request. A prediction at confidence 0.90 or higher gets its mapped category label; lower confidence or `UNCERTAIN` gets Review. Processed is added last, only after the first label succeeds. No other Gmail mutation is used. Valid predictions are saved to local history before message labels are applied, and remain unreviewed until a human accepts or corrects them.
 

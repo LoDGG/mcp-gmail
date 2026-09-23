@@ -97,6 +97,34 @@ def subtype_review_stats(rows: list[dict], *, min_messages: int) -> dict:
     }
 
 
+def provenance_performance(rows: list[dict]) -> list[dict]:
+    """Per-observation review metrics; never infer reviews for new predictions."""
+    fields = ("provider_id", "model_id", "taxonomy_version", "prompt_version")
+    groups = defaultdict(list)
+    for row in rows:
+        groups[tuple(row.get(field) for field in fields)].append(row)
+    result = []
+    for key, observations in sorted(groups.items(), key=lambda item: tuple(value or "" for value in item[0])):
+        reviewed = [row for row in observations if ground_truth(row) is not None]
+        category_corrections = sum(
+            ground_truth(row)["category"] != row["predicted_category"] for row in reviewed
+        )
+        subtype_counts = Counter(row.get("subtype_review_status", "pending") for row in observations)
+        subtype_reviewed = sum(subtype_counts[action] for action in ("accepted", "corrected", "rejected"))
+        result.append({
+            **dict(zip(fields, key)),
+            "prediction_count": len(observations),
+            "reviewed_count": len(reviewed),
+            "category_correction_count": category_corrections,
+            "category_correction_rate": category_corrections / len(reviewed) if reviewed else None,
+            "subtype_reviewed_count": subtype_reviewed,
+            "subtype_acceptance_rate": subtype_counts["accepted"] / subtype_reviewed if subtype_reviewed else None,
+            "subtype_correction_rate": subtype_counts["corrected"] / subtype_reviewed if subtype_reviewed else None,
+            "subtype_rejection_rate": subtype_counts["rejected"] / subtype_reviewed if subtype_reviewed else None,
+        })
+    return result
+
+
 def calculate_stats(rows: list[dict], *, subtype_min_messages: int = DEFAULT_SUBTYPE_MIN_MESSAGES) -> dict:
     reviewed = [row for row in rows if ground_truth(row) is not None]
     corrected = [row for row in reviewed if row["review_status"] == "corrected"]
@@ -117,6 +145,12 @@ def calculate_stats(rows: list[dict], *, subtype_min_messages: int = DEFAULT_SUB
     return {
         "classified_emails": len({row["message_id"] for row in rows}),
         "classification_records": len(rows),
+        "taxonomy_insufficiency_decisions": {
+            action: sum(row.get("primary_review_action") == action for row in rows)
+            for action in ("new_label", "accept_proposed_label")
+        },
+        "aggregate_scope": "All provenance groups combined; use performance_by_provenance for model comparisons",
+        "performance_by_provenance": provenance_performance(rows),
         "subtype_min_messages": subtype_min_messages,
         "subtype_candidates": recurring_subtypes(rows, min_messages=subtype_min_messages),
         "reviewed": reviewed_count,

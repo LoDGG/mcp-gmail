@@ -25,7 +25,13 @@ def main() -> None:
         if args.save_proposals:
             for proposal in candidates:
                 db.save_proposal(proposal, taxonomy.version)
+        supports = db.proposal_supports()
+        create_proposals = [
+            {**proposal, "supporting_evidence": [item for item in supports if item["proposal_id"] == proposal["id"]]}
+            for proposal in db.proposals() if proposal["proposal_type"] == "CREATE" and proposal["concept_key"]
+        ]
     print(json.dumps({"taxonomy_version": taxonomy.version, "statistics": stats,
+                      "stored_create_proposals": create_proposals,
                       "proposal_candidates": [candidate.__dict__ for candidate in candidates]}, indent=2))
 
 

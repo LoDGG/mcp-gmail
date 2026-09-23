@@ -9,7 +9,6 @@ from gmail_agent.classifier import BATCH_SIZE, SNIPPET_CHARS, classify_search
 from gmail_agent.gemini_classifier import GeminiBatchClassifier
 from gmail_agent.history import HistoryDB
 from gmail_agent.mcp_client import GmailMCPClient
-from gmail_agent.taxonomy import load_taxonomy
 
 
 def _count(value: int | None) -> str:
@@ -38,7 +37,7 @@ async def main() -> None:
         print(f"Gemini requests={provider.request_count} retries={provider.retry_count}", flush=True)
     if args.save:
         with HistoryDB(args.db) as db:
-            run_key = db.save_run(report.results, load_taxonomy())
+            run_key = db.save_run(report.results, report.taxonomy, provenance=report.provenance)
         print(f"Saved {len(report.results)} predictions in run {run_key}")
     for item in report.results:
         print(f"{item['message_id']}  {item['category']}  {item['confidence']:.2f}  reply={item['needs_reply']}  importance={item['importance']}  deadline={item['deadline'] or '-'}  {item['short_reason']}")

@@ -1,8 +1,10 @@
 """Compact local review of saved predictions; no provider or Gmail access."""
 
 import argparse
+import shlex
 
 from gmail_agent.history import HistoryDB
+from gmail_agent.label_suggestions import SuggestionPolicy
 from gmail_agent.taxonomy import load_taxonomy
 
 
@@ -29,39 +31,75 @@ def main() -> None:
                        help="Show items with pending category or subtype decisions (default)")
     queue.add_argument("--all", dest="only_unreviewed", action="store_false",
                        help="Include completed items; existing decisions cannot be overwritten")
+    for name, default in SuggestionPolicy().__dict__.items():
+        parser.add_argument("--label-" + name.replace("_", "-"), type=int, default=default,
+                            help=f"New-label suggestion {name.replace('_', ' ')} (default: {default})")
     args = parser.parse_args()
+    try:
+        policy = SuggestionPolicy(**{name: getattr(args, "label_" + name) for name in SuggestionPolicy().__dict__})
+    except ValueError as exc:
+        parser.error(str(exc))
     if args.limit is not None and args.limit < 1:
         parser.error("--limit must be positive")
     taxonomy = load_taxonomy()
-    print("a/accept | c/correct CATEGORY | s/skip | q/quit")
+    print('[a] accept | [c CATEGORY] correct | [n concept ["Display"]] new label | [s] skip | [q] quit')
     print("Optional subtype: sa=accept, sr=reject, sc HINT=correct; use alone or after a/c.")
     print("Categories: " + ", ".join(taxonomy.active_names))
     with HistoryDB(args.db) as db:
         rows = db.records()
         if args.only_unreviewed:
-            rows = [row for row in rows if row["review_status"] == "pending" or (
-                row["subtype_review_status"] == "pending" and row["subtype_hint"] is not None)]
+            rows = [row for row in rows if row.get("primary_review_action") not in {"new_label", "accept_proposed_label"}
+                    and (row["review_status"] == "pending" or (
+                        row["subtype_review_status"] == "pending" and row["subtype_hint"] is not None))]
         rows = rows[:args.limit]
         for position, row in enumerate(rows, 1):
             print(f"\n[{position}/{len(rows)}] {_display(row['message_id'])} | date={_display(row['email_date'])}")
             print(f"From: {_display(row['email_sender'])} | Subject: {_display(row['email_subject'])}")
-            print(f"{row['predicted_category']} {row['predicted_confidence']:.2f} | "
-                  f"subtype={_display(row['subtype_hint'])} | reply={bool(row['predicted_needs_reply'])} | "
+            print(f"Predicted: {row['predicted_category']} | Confidence: {row['predicted_confidence']:.2f} | "
+                  f"Subtype: {_display(row['subtype_hint'])} | reply={bool(row['predicted_needs_reply'])} | "
                   f"importance={row['predicted_importance']}"
                   + (f" | deadline={_display(row['predicted_deadline'])}" if row["predicted_deadline"] else ""))
             if row["review_status"] != "pending" or row["subtype_review_status"] != "pending":
                 print(f"Saved: category={row['corrected_category'] or row['predicted_category']} "
                       f"({row['review_status']}), subtype={row['corrected_subtype_hint'] or row['subtype_hint'] or '-'} "
                       f"({row['subtype_review_status']})")
+            suggestion = db.label_suggestion(row["id"], taxonomy=taxonomy, policy=policy)
+            if suggestion:
+                evidence = suggestion.evidence
+                print(f"Suggested new label: {_display(suggestion.concept_key)} | display: {_display(suggestion.display_label)}")
+                print(f"Evidence: {evidence['distinct_messages']} distinct messages, "
+                      f"{evidence['distinct_senders']} senders, {evidence['distinct_runs']} runs, "
+                      f"{evidence['human_approved_subtypes']} human-approved subtype hints, "
+                      f"{evidence['manual_new_label_messages']} manual proposals, "
+                      f"{evidence['category_correction_messages']} category corrections, "
+                      f"{evidence['raw_subtype_messages']} raw hints | score={suggestion.score}")
+                if suggestion.proposal_id is not None:
+                    print(f"Reuses pending CREATE proposal #{suggestion.proposal_id}")
+                print("[p] accept proposed label")
+            if row.get("primary_review_action") in {"new_label", "accept_proposed_label"}:
+                print(f"Saved: {row['primary_review_action']} (taxonomy insufficiency)")
             while True:
                 try:
-                    parts = input("> ").strip().split()
+                    parts = shlex.split(input("> ").strip())
                     if not parts:
                         continue
                     action = parts.pop(0).lower()
                     if action in {"q", "quit"} and not parts:
                         return
                     if action in {"s", "skip"} and not parts:
+                        break
+                    if action in {"n", "new"}:
+                        if len(parts) not in {1, 2}:
+                            raise ValueError('Use n concept or n concept "Display name"')
+                        proposal_id = db.propose_label(row["id"], parts[0], parts[1] if len(parts) == 2 else None,
+                                                       taxonomy=taxonomy)
+                        print(f"Saved CREATE proposal #{proposal_id}; no labels changed.")
+                        break
+                    if action in {"p", "proposed"}:
+                        if parts or suggestion is None:
+                            raise ValueError("No strong label suggestion is available")
+                        proposal_id = db.propose_label(row["id"], accept_suggested=True, taxonomy=taxonomy, policy=policy)
+                        print(f"Approved candidate #{proposal_id} for later taxonomy approval; no labels changed.")
                         break
                     category = None
                     if action in {"c", "correct"}:

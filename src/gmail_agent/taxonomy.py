@@ -4,6 +4,8 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
+from gmail_agent.gmail_labels import validate_user_label
+
 DEFAULT_TAXONOMY_PATH = Path(__file__).resolve().parents[2] / "config" / "taxonomy.json"
 IMPORTANCE_VALUES = ("low", "normal", "high")
 
@@ -21,11 +23,17 @@ class Taxonomy:
 
 
 def load_taxonomy(path: Path = DEFAULT_TAXONOMY_PATH) -> Taxonomy:
-    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    return taxonomy_from_data(json.loads(Path(path).read_text(encoding="utf-8")))
+
+
+def taxonomy_from_data(data: dict) -> Taxonomy:
     categories = tuple(data["categories"])
     required = {"name", "definition", "positive_guidance", "negative_guidance", "active"}
     if not all(required <= item.keys() for item in categories):
         raise ValueError("Taxonomy category is incomplete")
+    for category in categories:
+        if "gmail_label" in category:
+            validate_user_label(category["gmail_label"])
     names = [item["name"] for item in categories]
     if len(names) != len(set(names)):
         raise ValueError("Taxonomy category names must be unique")

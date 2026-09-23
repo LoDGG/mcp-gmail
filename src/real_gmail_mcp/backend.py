@@ -6,6 +6,7 @@ from typing import Any
 from googleapiclient.discovery import build
 
 from gmail_agent.triage import load_label_mapping
+from gmail_agent.gmail_labels import validate_user_label
 from real_gmail_mcp.oauth import load_credentials
 
 
@@ -71,6 +72,30 @@ class RealGmailBackend:
                 raise ValueError(f"Gmail did not return the expected user label {name!r}")
             self._user_label_ids[name] = created["id"]
         return {name: self._user_label_ids[name] for name in sorted(required)}
+
+    def ensure_approved_label(self, name: str, *, approved_names: frozenset[str]) -> str:
+        """Activation-only entry point; never exposed as an MCP/model tool.
+
+        The activation controller supplies a one-label allowlist only after
+        validating persisted human approval and local taxonomy constraints.
+        """
+        if not self.allow_label_writes:
+            raise PermissionError("Real Gmail label writes are disabled")
+        validate_user_label(name)
+        if approved_names != frozenset({name}):
+            raise PermissionError("Label is not in the explicit activation allowlist")
+        self.existing_user_labels()
+        if name.casefold() in {item.casefold() for item in self._system_label_names}:
+            raise ValueError("System labels cannot be created or modified")
+        if name in self._user_label_ids:
+            return self._user_label_ids[name]
+        if name.casefold() in {item.casefold() for item in self._user_label_ids}:
+            raise ValueError("Gmail label conflicts with an existing differently-cased label")
+        created = self._service.users().labels().create(userId="me", body={"name": name}).execute()
+        if created.get("name") != name or created.get("type") != "user" or not created.get("id"):
+            raise ValueError("Gmail did not return the approved user label")
+        self._user_label_ids[name] = created["id"]
+        return created["id"]
 
     def search_emails(self, query: str = "") -> list[dict[str, Any]]:
         if not isinstance(query, str):

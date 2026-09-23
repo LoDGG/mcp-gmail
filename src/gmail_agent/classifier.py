@@ -1,19 +1,24 @@
 """Separate, dry-run batch classification workflow."""
 
 import json
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, Callable, Protocol
 
 from jsonschema import ValidationError, validate
 
 from gmail_agent.core import ToolCall
+from gmail_agent.provenance import PredictionProvenance
 from gmail_agent.subtypes import SUBTYPE_HINT_SCHEMA, validate_subtype_hint
 from gmail_agent.mcp_client import GmailMCPClient
-from gmail_agent.taxonomy import IMPORTANCE_VALUES, load_taxonomy
+from gmail_agent.taxonomy import IMPORTANCE_VALUES, Taxonomy, load_taxonomy
 
 BATCH_SIZE = 10
 SNIPPET_CHARS = 200
-CATEGORIES = load_taxonomy().active_names
+CLASSIFIER_TAXONOMY = load_taxonomy()
+CATEGORIES = CLASSIFIER_TAXONOMY.active_names
+# Bump only for material changes to classifier instructions or output semantics.
+CLASSIFIER_PROMPT_VERSION = "classifier-v2"
 
 CLASSIFICATION_SCHEMA = {
     "type": "object",
@@ -40,6 +45,12 @@ CLASSIFICATION_SCHEMA = {
 }
 
 
+def build_classification_schema(taxonomy: Taxonomy) -> dict:
+    schema = deepcopy(CLASSIFICATION_SCHEMA)
+    schema["properties"]["results"]["items"]["properties"]["category"]["enum"] = list(taxonomy.active_names)
+    return schema
+
+
 @dataclass(frozen=True)
 class Usage:
     model: str
@@ -54,6 +65,7 @@ class BatchResponse:
     text: str
     usage: Usage
     request_count: int = 1
+    provenance: PredictionProvenance | None = None
 
 
 class BatchClassifierProvider(Protocol):
@@ -67,16 +79,18 @@ class BatchReport:
     batch_sizes: list[int]
     request_count: int
     emails_found: int = 0
+    provenance: PredictionProvenance | None = None
+    taxonomy: Taxonomy | None = None
 
 
 class ClassificationError(ValueError):
     pass
 
 
-def parse_results(text: str, expected_ids: list[str]) -> list[dict[str, Any]]:
+def parse_results(text: str, expected_ids: list[str], *, taxonomy: Taxonomy | None = None) -> list[dict[str, Any]]:
     try:
         parsed = json.loads(text)
-        validate(parsed, CLASSIFICATION_SCHEMA)
+        validate(parsed, build_classification_schema(taxonomy or load_taxonomy()))
         for item in parsed["results"]:
             validate_subtype_hint(item["subtype_hint"], item["category"])
     except (ValueError, ValidationError) as exc:
@@ -107,7 +121,9 @@ async def classify_search(
     query: str, provider: BatchClassifierProvider, mcp: GmailMCPClient,
     *, batch_size: int = BATCH_SIZE, max_emails: int = 20, snippet_chars: int = SNIPPET_CHARS,
     before_classify: Callable[[], None] | None = None,
+    taxonomy: Taxonomy | None = None,
 ) -> BatchReport:
+    taxonomy = taxonomy or getattr(provider, "taxonomy", None) or load_taxonomy()
     if batch_size < 1 or max_emails < 1 or snippet_chars < 1:
         raise ValueError("batch_size, max_emails, and snippet_chars must be positive")
     search = await mcp.call(ToolCall("search_emails", {"query": query}))
@@ -123,11 +139,16 @@ async def classify_search(
     usage: list[Usage] = []
     batch_sizes: list[int] = []
     request_count = 0
+    provenance = None
     for start in range(0, len(emails), batch_size):
         batch = emails[start:start + batch_size]
         model_batch = [{"index": index, **_compact(email, snippet_chars)} for index, email in enumerate(batch)]
         response = await provider.classify(model_batch)
-        results = parse_results(response.text, [email["id"] for email in batch])
+        if start == 0:
+            provenance = response.provenance
+        elif response.provenance != provenance:
+            raise ClassificationError("Classification provenance changed within a run")
+        results = parse_results(response.text, [email["id"] for email in batch], taxonomy=taxonomy)
         for result, email in zip(results, batch):
             # Review context comes from Gmail search metadata, never model output.
             result["review_metadata"] = {
@@ -138,4 +159,4 @@ async def classify_search(
         request_count += response.request_count
         usage.append(response.usage)
         batch_sizes.append(len(batch))
-    return BatchReport(all_results, usage, batch_sizes, request_count, len(messages))
+    return BatchReport(all_results, usage, batch_sizes, request_count, len(messages), provenance, taxonomy)

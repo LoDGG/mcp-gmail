@@ -30,7 +30,14 @@ class LabelMapping:
 def load_label_mapping(path: Path = DEFAULT_LABEL_MAP_PATH, taxonomy: Taxonomy | None = None) -> LabelMapping:
     taxonomy = taxonomy or load_taxonomy()
     data = json.loads(Path(path).read_text(encoding="utf-8"))
-    mapping = LabelMapping(data["category_labels"], data["review_label"], data["processed_label"])
+    category_labels = dict(data["category_labels"])
+    for category in taxonomy.categories:
+        if category["active"] and "gmail_label" in category:
+            name, label = category["name"], category["gmail_label"]
+            if name == "UNCERTAIN" or (name in category_labels and category_labels[name] != label):
+                raise ValueError("Taxonomy label conflicts with existing static mapping")
+            category_labels[name] = label
+    mapping = LabelMapping(category_labels, data["review_label"], data["processed_label"])
     expected = set(taxonomy.active_names) - {"UNCERTAIN"}
     if set(mapping.category_labels) != expected or len(mapping.required_labels) != len(expected) + 2:
         raise ValueError("Gmail label mapping must cover each active category with unique labels")
@@ -87,9 +94,9 @@ async def triage_search(
         label_backend.ensure_triage_labels()
 
     classified: BatchReport = await classify_search(
-        query, provider, mcp, batch_size=batch_size, max_emails=max_emails,
+        query, provider, mcp, batch_size=batch_size, max_emails=max_emails, taxonomy=taxonomy,
     )
-    saved_run = db.save_run(classified.results, taxonomy) if classified.results else None
+    saved_run = db.save_run(classified.results, taxonomy, provenance=classified.provenance) if classified.results else None
     outcomes = []
     for result in classified.results:
         label = _choice(result, mapping)

@@ -7,6 +7,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
+from gmail_agent.label_suggestions import SuggestionPolicy, normalize_concept, represented_concept, suggest_label
+from gmail_agent.provenance import PredictionProvenance
 from gmail_agent.subtypes import validate_subtype_hint
 from gmail_agent.taxonomy import IMPORTANCE_VALUES, Taxonomy, load_taxonomy
 
@@ -81,8 +83,57 @@ class HistoryDB:
                 );
             """)
 
+            proposal_columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(taxonomy_proposals)")}
+            for name, definition in {
+                "concept_key": "TEXT", "display_label": "TEXT", "updated_at": "TEXT",
+                "ready_for_approval": "INTEGER NOT NULL DEFAULT 0 CHECK(ready_for_approval IN (0, 1))",
+            }.items():
+                if name not in proposal_columns:
+                    self.conn.execute(f"ALTER TABLE taxonomy_proposals ADD COLUMN {name} {definition}")
+            self.conn.executescript("""
+                CREATE UNIQUE INDEX IF NOT EXISTS create_proposal_concept
+                ON taxonomy_proposals(concept_key) WHERE proposal_type = 'CREATE' AND concept_key IS NOT NULL;
+                CREATE TABLE IF NOT EXISTS taxonomy_proposal_support (
+                    id INTEGER PRIMARY KEY,
+                    proposal_id INTEGER NOT NULL REFERENCES taxonomy_proposals(id),
+                    classification_id INTEGER NOT NULL REFERENCES classifications(id),
+                    message_id TEXT NOT NULL,
+                    source TEXT NOT NULL CHECK(source IN ('human_manual', 'human_proposal_accept',
+                        'model_subtype', 'human_subtype', 'category_correction')),
+                    display_label TEXT,
+                    created_at TEXT NOT NULL,
+                    UNIQUE(proposal_id, message_id, source)
+                );
+            """)
+
+            self.conn.execute("""
+                CREATE TABLE IF NOT EXISTS taxonomy_activations (
+                    proposal_id INTEGER PRIMARY KEY REFERENCES taxonomy_proposals(id),
+                    activation_id TEXT NOT NULL UNIQUE,
+                    concept_key TEXT NOT NULL,
+                    category_id TEXT NOT NULL,
+                    display_label TEXT NOT NULL,
+                    category_json TEXT NOT NULL,
+                    taxonomy_path TEXT NOT NULL,
+                    gmail_label_id TEXT,
+                    approved_at TEXT NOT NULL,
+                    activated_at TEXT,
+                    taxonomy_version TEXT NOT NULL,
+                    status TEXT NOT NULL CHECK(status IN ('activating', 'active', 'failed')),
+                    last_error TEXT,
+                    updated_at TEXT NOT NULL
+                )
+            """)
+
+            run_columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(classification_runs)")}
+            for name in ("provider_id", "model_id", "prompt_version"):
+                if name not in run_columns:
+                    # Unknown historical provenance stays NULL; never infer it.
+                    self.conn.execute(f"ALTER TABLE classification_runs ADD COLUMN {name} TEXT")
+
             columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(classifications)")}
             additions = {
+                "primary_review_action": "TEXT CHECK(primary_review_action IN ('accept', 'correct', 'new_label', 'accept_proposed_label'))",
                 "subtype_hint": "TEXT",
                 "email_date": "TEXT",
                 "email_sender": "TEXT",
@@ -95,8 +146,14 @@ class HistoryDB:
                 if name not in columns:
                     self.conn.execute(f"ALTER TABLE classifications ADD COLUMN {name} {definition}")
 
-    def save_run(self, results: list[dict], taxonomy: Taxonomy | None = None, *, run_key: str | None = None) -> str:
+    def save_run(
+        self, results: list[dict], taxonomy: Taxonomy | None = None, *,
+        run_key: str | None = None, provenance: PredictionProvenance | None = None,
+    ) -> str:
         taxonomy = taxonomy or load_taxonomy()
+        provenance = provenance or PredictionProvenance()
+        if provenance.taxonomy_version is not None and provenance.taxonomy_version != taxonomy.version:
+            raise ValueError("Provenance taxonomy version does not match classification taxonomy")
         run_key = run_key or str(uuid4())
         if len({item["message_id"] for item in results}) != len(results):
             raise ValueError("Duplicate message ID in classification run")
@@ -111,10 +168,17 @@ class HistoryDB:
         timestamp = _now()
         with self.conn:
             self.conn.execute(
-                "INSERT OR IGNORE INTO classification_runs(run_key, created_at, taxonomy_version) VALUES (?, ?, ?)",
-                (run_key, timestamp, taxonomy.version),
+                """INSERT OR IGNORE INTO classification_runs
+                   (run_key, created_at, taxonomy_version, provider_id, model_id, prompt_version)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (run_key, timestamp, taxonomy.version, provenance.provider_id, provenance.model_id, provenance.prompt_version),
             )
-            run_id = self.conn.execute("SELECT id FROM classification_runs WHERE run_key = ?", (run_key,)).fetchone()["id"]
+            run = self.conn.execute("SELECT * FROM classification_runs WHERE run_key = ?", (run_key,)).fetchone()
+            if (run["taxonomy_version"], run["provider_id"], run["model_id"], run["prompt_version"]) != (
+                taxonomy.version, provenance.provider_id, provenance.model_id, provenance.prompt_version,
+            ):
+                raise ValueError("Run key already exists with different provenance")
+            run_id = run["id"]
             for item in results:
                 # Only explicitly selected, bounded header metadata is persisted.
                 metadata = item.get("review_metadata") or {}
@@ -136,11 +200,15 @@ class HistoryDB:
         return run_key
 
     def records(self) -> list[dict]:
-        return [dict(row) for row in self.conn.execute("SELECT * FROM classifications ORDER BY id")]
+        return [dict(row) for row in self.conn.execute("""
+            SELECT c.*, r.provider_id, r.model_id, r.prompt_version
+            FROM classifications AS c JOIN classification_runs AS r ON r.id = c.run_id
+            ORDER BY c.id
+        """)]
 
     def pending(self, *, exclude_ids: set[int] | None = None) -> list[dict]:
         excluded = exclude_ids or set()
-        return [row for row in self.records() if row["review_status"] == "pending" and row["id"] not in excluded]
+        return [row for row in self.records() if row["review_status"] == "pending" and row["primary_review_action"] is None and row["id"] not in excluded]
 
     def review(
         self, classification_id: int, action: str, *, category: str | None = None,
@@ -149,7 +217,7 @@ class HistoryDB:
         subtype_action: str | None = None, corrected_subtype: str | None = None,
     ) -> None:
         row = self.conn.execute("SELECT * FROM classifications WHERE id = ?", (classification_id,)).fetchone()
-        if row is None or row["review_status"] != "pending":
+        if row is None or row["review_status"] != "pending" or row["primary_review_action"] is not None:
             raise ValueError("Classification is missing or already reviewed")
         if action not in {"accepted", "corrected"}:
             raise ValueError("Review action must be accepted or corrected")
@@ -176,10 +244,11 @@ class HistoryDB:
             self.conn.execute("""
                 UPDATE classifications SET review_status = ?, reviewed_at = ?, corrected_category = ?,
                     corrected_needs_reply = ?, corrected_importance = ?, corrected_deadline = ?,
-                    corrected_deadline_set = ? WHERE id = ?
+                    corrected_deadline_set = ?, primary_review_action = ? WHERE id = ?
             """, (
                 action, _now(), category, None if needs_reply is None else int(needs_reply),
-                importance, None if deadline is UNSET else deadline, int(deadline is not UNSET), classification_id,
+                importance, None if deadline is UNSET else deadline, int(deadline is not UNSET),
+                "accept" if action == "accepted" else "correct", classification_id,
             ))
             if subtype_action is not None:
                 self._write_subtype_review(classification_id, subtype_action, corrected_subtype)
@@ -217,6 +286,103 @@ class HistoryDB:
                                       row["corrected_category"] or row["predicted_category"])
         with self.conn:
             self._write_subtype_review(classification_id, action, corrected_subtype)
+
+    def activation_records(self) -> list[dict]:
+        return [dict(row) for row in self.conn.execute("SELECT * FROM taxonomy_activations ORDER BY proposal_id")]
+
+    def proposal_supports(self) -> list[dict]:
+        return [dict(row) for row in self.conn.execute("SELECT * FROM taxonomy_proposal_support ORDER BY id")]
+
+    def label_suggestion(self, classification_id: int, *, taxonomy: Taxonomy | None = None,
+                         policy: SuggestionPolicy = SuggestionPolicy()):
+        rows = self.records()
+        current = next((row for row in rows if row["id"] == classification_id), None)
+        if current is None:
+            raise ValueError("Classification is missing")
+        return suggest_label(current, rows, self.proposals(), self.proposal_supports(),
+                             taxonomy or load_taxonomy(), policy)
+
+    def propose_label(
+        self, classification_id: int, concept: str | None = None, display_label: str | None = None,
+        *, accept_suggested: bool = False, taxonomy: Taxonomy | None = None,
+        policy: SuggestionPolicy = SuggestionPolicy(),
+    ) -> int:
+        taxonomy = taxonomy or load_taxonomy()
+        row = self.conn.execute("SELECT * FROM classifications WHERE id = ?", (classification_id,)).fetchone()
+        if row is None or row["review_status"] != "pending" or row["primary_review_action"] is not None:
+            raise ValueError("Classification is missing or already reviewed")
+        suggestion = None
+        if accept_suggested:
+            suggestion = self.label_suggestion(classification_id, taxonomy=taxonomy, policy=policy)
+            if suggestion is None:
+                raise ValueError("No strong label suggestion is available")
+            concept, display_label = suggestion.concept_key, suggestion.display_label
+        concept = normalize_concept(concept)
+        if represented_concept(concept, taxonomy):
+            raise ValueError("Concept is already represented by an existing category")
+        if display_label is not None:
+            display_label = display_label.strip()
+            if not display_label or len(display_label) > 80 or not all(c.isprintable() for c in display_label):
+                raise ValueError("Display label must be printable and at most 80 characters")
+        existing = next((item for item in self.proposals()
+                         if item["proposal_type"] == "CREATE" and item.get("concept_key") == concept), None)
+        if existing and existing["status"] != "proposed":
+            raise ValueError("This concept already has a resolved proposal")
+        if not existing:
+            for item in self.proposals():
+                if item["proposal_type"] == "CREATE" and item.get("concept_key") is None:
+                    if concept in {normalize_concept(name) for name in item["affected_categories"]}:
+                        raise ValueError("A legacy CREATE proposal already represents this concept")
+        now = _now()
+        source = "human_proposal_accept" if accept_suggested else "human_manual"
+        with self.conn:
+            if existing:
+                proposal_id = existing["id"]
+            else:
+                cursor = self.conn.execute("""
+                    INSERT INTO taxonomy_proposals (
+                        created_at, taxonomy_version, proposal_type, affected_categories,
+                        evidence_counts, rationale, expected_benefit, evidence_strength, status,
+                        concept_key, display_label, updated_at
+                    ) VALUES (?, ?, 'CREATE', ?, '{}', ?, ?, ?, 'proposed', ?, ?, ?)
+                """, (now, taxonomy.version, json.dumps([row["predicted_category"]]),
+                      "Human reports taxonomy insufficiency; inspect evidence before taxonomy approval.",
+                      "Represent a recurring mailbox concept if approved.",
+                      "strong" if accept_suggested else "human_proposed", concept, display_label, now))
+                proposal_id = cursor.lastrowid
+            self.conn.execute("""
+                INSERT OR IGNORE INTO taxonomy_proposal_support
+                (proposal_id, classification_id, message_id, source, display_label, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (proposal_id, classification_id, row["message_id"], source, display_label, now))
+            if suggestion:
+                for supporting_id, supporting_source in suggestion.supporting_evidence:
+                    self.conn.execute("""
+                        INSERT OR IGNORE INTO taxonomy_proposal_support
+                        (proposal_id, classification_id, message_id, source, created_at)
+                        SELECT ?, id, message_id, ?, ? FROM classifications WHERE id = ?
+                    """, (proposal_id, supporting_source, now, supporting_id))
+            evidence = dict(suggestion.evidence) if suggestion else {}
+            counts = self.conn.execute("""
+                SELECT source, COUNT(DISTINCT message_id) AS count FROM taxonomy_proposal_support
+                WHERE proposal_id = ? GROUP BY source
+            """, (proposal_id,)).fetchall()
+            evidence.update({item["source"]: item["count"] for item in counts})
+            if suggestion:
+                evidence["score_at_approval"] = suggestion.score
+            elif existing:
+                evidence = {**existing["evidence_counts"], **evidence}
+            self.conn.execute("""
+                UPDATE taxonomy_proposals SET display_label = COALESCE(display_label, ?),
+                    evidence_counts = ?, updated_at = ?, ready_for_approval = MAX(ready_for_approval, ?),
+                    evidence_strength = CASE WHEN ? THEN 'strong' ELSE evidence_strength END
+                WHERE id = ?
+            """, (display_label, json.dumps(evidence), now, int(accept_suggested), int(accept_suggested), proposal_id))
+            # This records insufficiency, not a category acceptance or correction.
+            self.conn.execute("""
+                UPDATE classifications SET primary_review_action = ?, reviewed_at = ? WHERE id = ?
+            """, ("accept_proposed_label" if accept_suggested else "new_label", now, classification_id))
+        return proposal_id
 
     def save_proposal(self, proposal, taxonomy_version: str) -> int:
         with self.conn:
