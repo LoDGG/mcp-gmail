@@ -1,16 +1,21 @@
 """Gemini structured-output adapter for batch classification."""
 
+import asyncio
 import json
 import os
+from collections.abc import Awaitable, Callable
 
 from google import genai
-from google.genai import types
+from google.genai import errors, types
 
 from gmail_agent.classifier import BatchResponse, CLASSIFICATION_SCHEMA, Usage
 
 
 class GeminiBatchClassifier:
-    def __init__(self, client: genai.Client | None = None) -> None:
+    def __init__(
+        self, client: genai.Client | None = None,
+        *, sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    ) -> None:
         self.model = os.environ.get("GEMINI_MODEL", "gemini-3.6-flash")
         if client is None:
             key = os.environ.get("GEMINI_API_KEY")
@@ -18,6 +23,9 @@ class GeminiBatchClassifier:
                 raise ValueError("GEMINI_API_KEY is required")
             client = genai.Client(api_key=key)
         self.client = client
+        self.sleep = sleep
+        self.request_count = 0
+        self.retry_count = 0
 
     async def classify(self, emails: list[dict[str, str | int]]) -> BatchResponse:
         prompt = (
@@ -26,16 +34,29 @@ class GeminiBatchClassifier:
             "Set importance to low, normal, or high. Keep short_reason to a few words and deadline concise or null.\n"
             + json.dumps(emails, ensure_ascii=False, separators=(",", ":"))
         )
-        response = await self.client.aio.models.generate_content(
-            model=self.model,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-                response_json_schema=CLASSIFICATION_SCHEMA,
-                automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
-                thinking_config=types.ThinkingConfig(thinking_level=types.ThinkingLevel.MINIMAL),
-            ),
+        config = types.GenerateContentConfig(
+            response_mime_type="application/json",
+            response_json_schema=CLASSIFICATION_SCHEMA,
+            automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
+            thinking_config=types.ThinkingConfig(thinking_level=types.ThinkingLevel.MINIMAL),
+            # Keep SDK retries from multiplying our three-attempt budget.
+            http_options=types.HttpOptions(retry_options=types.HttpRetryOptions(attempts=1)),
         )
+        delays = (20, 60)
+        for attempt in range(3):
+            self.request_count += 1
+            if attempt:
+                self.retry_count += 1
+            try:
+                response = await self.client.aio.models.generate_content(
+                    model=self.model, contents=prompt, config=config,
+                )
+            except errors.APIError as exc:
+                if exc.code not in {429, 500, 502, 503, 504} or attempt == 2:
+                    raise
+                await self.sleep(delays[attempt])
+            else:
+                break
         metadata = response.usage_metadata
         return BatchResponse(
             response.text or "",
@@ -46,4 +67,5 @@ class GeminiBatchClassifier:
                 getattr(metadata, "total_token_count", None),
                 getattr(metadata, "thoughts_token_count", None),
             ),
+            request_count=attempt + 1,
         )

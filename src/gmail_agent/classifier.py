@@ -51,6 +51,7 @@ class Usage:
 class BatchResponse:
     text: str
     usage: Usage
+    request_count: int = 1
 
 
 class BatchClassifierProvider(Protocol):
@@ -117,11 +118,13 @@ async def classify_search(
     all_results: list[dict[str, Any]] = []
     usage: list[Usage] = []
     batch_sizes: list[int] = []
+    request_count = 0
     for start in range(0, len(emails), batch_size):
         batch = emails[start:start + batch_size]
         model_batch = [{"index": index, **_compact(email, snippet_chars)} for index, email in enumerate(batch)]
         response = await provider.classify(model_batch)
         all_results.extend(parse_results(response.text, [email["id"] for email in batch]))
+        request_count += response.request_count
         usage.append(response.usage)
         batch_sizes.append(len(batch))
-    return BatchReport(all_results, usage, batch_sizes, len(usage), len(messages))
+    return BatchReport(all_results, usage, batch_sizes, request_count, len(messages))

@@ -37,19 +37,22 @@ async def main() -> None:
         server = create_fake_server()
     else:
         parser.error("GMAIL_BACKEND must be 'fake' or 'real'")
-    with HistoryDB(args.db) as db:
-        async with GmailMCPClient(server) as mcp:
-            report = await triage_search(
-                args.query, GeminiBatchClassifier(), mcp, db,
-                apply=args.apply, label_writes=write_opt_in, label_backend=backend,
-                batch_size=args.batch_size, max_emails=args.max_emails,
-            )
+    provider = GeminiBatchClassifier()
+    try:
+        with HistoryDB(args.db) as db:
+            async with GmailMCPClient(server) as mcp:
+                report = await triage_search(
+                    args.query, provider, mcp, db,
+                    apply=args.apply, label_writes=write_opt_in, label_backend=backend,
+                    batch_size=args.batch_size, max_emails=args.max_emails,
+                )
+    finally:
+        print(f"Gemini requests={provider.request_count} retries={provider.retry_count}", flush=True)
     print(f"emails found={report.emails_found} classified={report.emails_classified}")
     for item in report.outcomes:
         print(f"{item.message_id} category={item.category} confidence={item.confidence:.2f} action={item.action_label} processed={item.processed}" + (f" error={item.error}" if item.error else ""))
     for usage, size in zip(report.usage, report.batch_sizes):
         print(f"usage model={usage.model} emails_batch={size} input={_count(usage.input_tokens)} output={_count(usage.output_tokens)} thinking={_count(usage.thinking_tokens)} total={_count(usage.total_tokens)}")
-    print(f"Gemini requests={report.request_count}")
 
 
 if __name__ == "__main__":

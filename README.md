@@ -48,7 +48,7 @@ The CLI uses `GMAIL_BACKEND=fake` by default. Real Gmail requires an explicit qu
 GMAIL_BACKEND=real GMAIL_LABEL_WRITES=0 uv run python -m gmail_agent.classify_cli --query 'in:inbox newer_than:7d' --max-emails 5 --batch-size 5
 ```
 
-The classifier forces real label writes off even if `GMAIL_LABEL_WRITES=1` is present in its environment. The CLI prints one concise classification per message, then model name, batch email count, input/output/total token counts when supplied by Gemini, and the Gemini request count. It makes one Gemini request per nonempty batch.
+The classifier forces real label writes off even if `GMAIL_LABEL_WRITES=1` is present in its environment. The CLI prints one concise classification per message, then model name, batch email count, input/output/total token counts when supplied by Gemini, and the Gemini request count. A successful first attempt makes one Gemini request per nonempty batch. Only Gemini HTTP 429, 500, 502, 503, and 504 failures are retried, with waits of 20 and 60 seconds and at most three total attempts per batch. SDK retries are disabled for these requests. Both classification CLIs print actual request and retry counts, including on failure (for example, `Gemini requests=3 retries=2`). Authentication, invalid requests, invalid model output, application validation, and Gmail writes are not retried. Exhausted provider failures propagate as a failed run before any message labels or predictions are saved, leaving messages eligible for the next scheduled run.
 
 ## Local taxonomy learning
 
