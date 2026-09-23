@@ -72,6 +72,9 @@ async def test_ten_emails_one_batch_all_categories_and_no_mutation(monkeypatch):
     assert all("m-" not in json.dumps(email) for email in provider.batches[0])
     assert [result["category"] for result in report.results] == list(CATEGORIES[:10])
     assert [result["message_id"] for result in report.results] == [f"m-{index}" for index in range(10)]
+    assert report.results[0]["review_metadata"] == {
+        "sender": "a@example.test", "subject": "Subject 0",
+    }
     assert report.request_count == 1
     assert report.batch_sizes == [10]
     assert report.usage == [Usage("fake-model", 12, 8, 20)]

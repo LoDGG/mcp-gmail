@@ -127,7 +127,14 @@ async def classify_search(
         batch = emails[start:start + batch_size]
         model_batch = [{"index": index, **_compact(email, snippet_chars)} for index, email in enumerate(batch)]
         response = await provider.classify(model_batch)
-        all_results.extend(parse_results(response.text, [email["id"] for email in batch]))
+        results = parse_results(response.text, [email["id"] for email in batch])
+        for result, email in zip(results, batch):
+            # Review context comes from Gmail search metadata, never model output.
+            result["review_metadata"] = {
+                key: email[key] for key in ("date", "sender", "subject")
+                if isinstance(email.get(key), str)
+            }
+        all_results.extend(results)
         request_count += response.request_count
         usage.append(response.usage)
         batch_sizes.append(len(batch))

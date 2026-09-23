@@ -1,4 +1,4 @@
-"""Local classification and human-review history. No email content is stored."""
+"""Local classification and human-review history. Only bounded review headers are stored; never bodies or snippets."""
 
 import json
 import os
@@ -82,9 +82,18 @@ class HistoryDB:
             """)
 
             columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(classifications)")}
-            if "subtype_hint" not in columns:
-                # Additive migration preserves records, reviews, IDs, and constraints.
-                self.conn.execute("ALTER TABLE classifications ADD COLUMN subtype_hint TEXT")
+            additions = {
+                "subtype_hint": "TEXT",
+                "email_date": "TEXT",
+                "email_sender": "TEXT",
+                "email_subject": "TEXT",
+                "subtype_review_status": "TEXT NOT NULL DEFAULT 'pending' CHECK(subtype_review_status IN ('pending', 'accepted', 'rejected', 'corrected'))",
+                "corrected_subtype_hint": "TEXT",
+                "subtype_reviewed_at": "TEXT",
+            }
+            for name, definition in additions.items():
+                if name not in columns:
+                    self.conn.execute(f"ALTER TABLE classifications ADD COLUMN {name} {definition}")
 
     def save_run(self, results: list[dict], taxonomy: Taxonomy | None = None, *, run_key: str | None = None) -> str:
         taxonomy = taxonomy or load_taxonomy()
@@ -107,17 +116,22 @@ class HistoryDB:
             )
             run_id = self.conn.execute("SELECT id FROM classification_runs WHERE run_key = ?", (run_key,)).fetchone()["id"]
             for item in results:
-                # Explicit columns prevent subject, snippet, body, or other API fields from being persisted.
+                # Only explicitly selected, bounded header metadata is persisted.
+                metadata = item.get("review_metadata") or {}
+                headers = tuple(
+                    metadata.get(key)[:limit] if isinstance(metadata.get(key), str) else None
+                    for key, limit in (("date", 100), ("sender", 320), ("subject", 500))
+                )
                 self.conn.execute("""
                     INSERT OR IGNORE INTO classifications (
                         run_id, message_id, classified_at, taxonomy_version, predicted_category,
                         predicted_confidence, predicted_needs_reply, predicted_importance,
-                        predicted_deadline, short_reason, subtype_hint
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        predicted_deadline, short_reason, subtype_hint, email_date, email_sender, email_subject
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     run_id, item["message_id"], timestamp, taxonomy.version, item["category"],
                     item["confidence"], int(item["needs_reply"]), item["importance"],
-                    item["deadline"], item["short_reason"], item.get("subtype_hint"),
+                    item["deadline"], item["short_reason"], item.get("subtype_hint"), *headers,
                 ))
         return run_key
 
@@ -132,6 +146,7 @@ class HistoryDB:
         self, classification_id: int, action: str, *, category: str | None = None,
         needs_reply: bool | None = None, importance: str | None = None, deadline=UNSET,
         taxonomy: Taxonomy | None = None,
+        subtype_action: str | None = None, corrected_subtype: str | None = None,
     ) -> None:
         row = self.conn.execute("SELECT * FROM classifications WHERE id = ?", (classification_id,)).fetchone()
         if row is None or row["review_status"] != "pending":
@@ -153,6 +168,10 @@ class HistoryDB:
             raise ValueError("Invalid importance")
         if deadline is not UNSET and deadline is not None and (not isinstance(deadline, str) or len(deadline) > 80):
             raise ValueError("Invalid deadline")
+        if subtype_action is not None:
+            self._validate_subtype_review(row, subtype_action, corrected_subtype, category or row["predicted_category"])
+        elif corrected_subtype is not None:
+            raise ValueError("Subtype correction requires a subtype decision")
         with self.conn:
             self.conn.execute("""
                 UPDATE classifications SET review_status = ?, reviewed_at = ?, corrected_category = ?,
@@ -162,6 +181,42 @@ class HistoryDB:
                 action, _now(), category, None if needs_reply is None else int(needs_reply),
                 importance, None if deadline is UNSET else deadline, int(deadline is not UNSET), classification_id,
             ))
+            if subtype_action is not None:
+                self._write_subtype_review(classification_id, subtype_action, corrected_subtype)
+
+    @staticmethod
+    def _validate_subtype_review(row, action, corrected_subtype, category) -> None:
+        if row["subtype_review_status"] != "pending":
+            raise ValueError("Subtype is already reviewed")
+        if action not in {"accepted", "rejected", "corrected"}:
+            raise ValueError("Invalid subtype decision")
+        if action != "corrected" and corrected_subtype is not None:
+            raise ValueError("Only subtype correction can include a new hint")
+        if action == "accepted":
+            if row["subtype_hint"] is None:
+                raise ValueError("No subtype hint to accept")
+            validate_subtype_hint(row["subtype_hint"], category)
+        if action == "rejected" and row["subtype_hint"] is None:
+            raise ValueError("No subtype hint to reject")
+        if action == "corrected":
+            if corrected_subtype is None or corrected_subtype == row["subtype_hint"]:
+                raise ValueError("Subtype correction requires a changed hint")
+            validate_subtype_hint(corrected_subtype, category)
+
+    def _write_subtype_review(self, classification_id, action, corrected_subtype) -> None:
+        self.conn.execute("""
+            UPDATE classifications SET subtype_review_status = ?, corrected_subtype_hint = ?,
+                subtype_reviewed_at = ? WHERE id = ?
+        """, (action, corrected_subtype, _now(), classification_id))
+
+    def review_subtype(self, classification_id: int, action: str, *, corrected_subtype: str | None = None) -> None:
+        row = self.conn.execute("SELECT * FROM classifications WHERE id = ?", (classification_id,)).fetchone()
+        if row is None:
+            raise ValueError("Classification is missing")
+        self._validate_subtype_review(row, action, corrected_subtype,
+                                      row["corrected_category"] or row["predicted_category"])
+        with self.conn:
+            self._write_subtype_review(classification_id, action, corrected_subtype)
 
     def save_proposal(self, proposal, taxonomy_version: str) -> int:
         with self.conn:

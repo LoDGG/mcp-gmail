@@ -60,6 +60,43 @@ def recurring_subtypes(rows: list[dict], *, min_messages: int = DEFAULT_SUBTYPE_
     ]
 
 
+def subtype_review_stats(rows: list[dict], *, min_messages: int) -> dict:
+    reviewed = [row for row in rows if row.get("subtype_review_status", "pending") != "pending"]
+    decisions = Counter(row["subtype_review_status"] for row in reviewed)
+    disagreements = Counter()
+    selected = {}
+    for row in sorted(reviewed, key=lambda row: (row.get("subtype_reviewed_at") or "", row.get("id", 0))):
+        selected[row["message_id"]] = row
+        if row["subtype_review_status"] in {"rejected", "corrected"}:
+            disagreements[(row.get("subtype_hint"), row.get("corrected_subtype_hint"),
+                           row["subtype_review_status"])] += 1
+    approved = Counter()
+    for row in selected.values():
+        truth = ground_truth(row)
+        if truth is None:
+            continue
+        status = row["subtype_review_status"]
+        hint = row.get("corrected_subtype_hint") if status == "corrected" else row.get("subtype_hint")
+        if status in {"accepted", "corrected"} and hint is not None:
+            approved[(truth["category"], hint)] += 1
+    disagreement_count = sum(disagreements.values())
+    return {
+        "subtype_reviewed": len(reviewed),
+        "subtype_review_counts": {action: decisions[action] for action in ("accepted", "rejected", "corrected")},
+        "model_subtype_disagreement_count": disagreement_count,
+        "model_subtype_disagreement_rate": disagreement_count / len(reviewed) if reviewed else 0.0,
+        "model_subtype_disagreements": [
+            {"model_subtype": model, "human_subtype": human, "decision": decision, "count": count}
+            for (model, human, decision), count in sorted(
+                disagreements.items(), key=lambda item: tuple(value or "" for value in item[0]))
+        ],
+        "human_approved_subtype_candidates": [
+            {"category": category, "subtype_hint": hint, "distinct_messages": count}
+            for (category, hint), count in sorted(approved.items()) if count >= min_messages
+        ],
+    }
+
+
 def calculate_stats(rows: list[dict], *, subtype_min_messages: int = DEFAULT_SUBTYPE_MIN_MESSAGES) -> dict:
     reviewed = [row for row in rows if ground_truth(row) is not None]
     corrected = [row for row in reviewed if row["review_status"] == "corrected"]
@@ -83,6 +120,9 @@ def calculate_stats(rows: list[dict], *, subtype_min_messages: int = DEFAULT_SUB
         "subtype_min_messages": subtype_min_messages,
         "subtype_candidates": recurring_subtypes(rows, min_messages=subtype_min_messages),
         "reviewed": reviewed_count,
+        "accepted_category_rate": sum(ground_truth(row)["category"] == row["predicted_category"] for row in reviewed) / reviewed_count if reviewed_count else 0.0,
+        "category_correction_rate": sum(correction_categories.values()) / reviewed_count if reviewed_count else 0.0,
+        **subtype_review_stats(rows, min_messages=subtype_min_messages),
         "category_distribution": dict(distribution),
         "uncertain_rate": distribution["UNCERTAIN"] / len(rows) if rows else 0.0,
         "confidence_distribution": confidence,

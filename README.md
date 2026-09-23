@@ -54,7 +54,7 @@ The classifier forces real label writes off even if `GMAIL_LABEL_WRITES=1` is pr
 
 `config/taxonomy.json` defines taxonomy version `1.0.0`, eleven active primary categories, category guidance, a target of 8–12 categories, and a hard cap of 12. The classifier now also predicts `importance` (`low`, `normal`, or `high`); `needs_reply` and `deadline` remain separate attributes. This changes the classifier's structured output contract, so classify new batches with the current code before saving them.
 
-Use `--save` to persist a dry-run batch to `.local/gmail_agent.db` (or set `GMAIL_AGENT_DB`, or pass `--db`). The SQLite history keeps message IDs, predictions, taxonomy versions, run timestamps, and human review decisions. It does not save subjects, snippets, or bodies. A run key and a unique run/message pair prevent duplicate entries when the same run is saved twice. The classifier remains dry-run even if the environment enables Gmail label writes.
+Use `--save` to persist a dry-run batch to `.local/gmail_agent.db` (or set `GMAIL_AGENT_DB`, or pass `--db`). The SQLite history keeps message IDs, predictions, taxonomy versions, run timestamps, and human review decisions. It also saves available date, sender, and subject headers for offline review (bounded to 100, 320, and 500 characters respectively). It never saves snippets or bodies. Headers come from search results, not model output; legacy rows show unavailable metadata. A run key and a unique run/message pair prevent duplicate entries when the same run is saved twice. The classifier remains dry-run even if the environment enables Gmail label writes.
 
 ```bash
 GMAIL_BACKEND=real GMAIL_LABEL_WRITES=0 uv run python -m gmail_agent.classify_cli --query 'in:inbox newer_than:7d' --max-emails 10 --batch-size 10 --save
@@ -62,13 +62,35 @@ uv run python -m gmail_agent.review_cli
 uv run python -m gmail_agent.taxonomy_stats
 ```
 
-The review CLI shows one saved prediction at a time. Accept records the prediction as ground truth; correct records only changed fields; skip leaves it pending. Pending predictions are never ground truth. The stats command uses local SQLite data only and reports category distribution, UNCERTAIN and confidence distributions, correction and disagreement rates, confusion counts, and deterministic proposal candidates. Confidence is a model score, not measured accuracy. Candidate types are CREATE, MERGE, SPLIT, DEPRECATE, and REFINE_DEFINITION. Candidates do not modify the taxonomy; use `uv run python -m gmail_agent.taxonomy_stats --save-proposals` only if you want to keep candidate records for later review.
+The review CLI shows a compact local queue with message ID, available date/sender/subject, primary category, confidence, subtype hint, needs_reply, importance, and deadline. Accept records primary prediction attributes as ground truth; category correction preserves the original prediction and records a separate human category. Skip leaves the record unchanged and moves on for this session. Pending primary predictions are never ground truth. The stats command uses local SQLite data only and reports category distribution, UNCERTAIN and confidence distributions, correction and disagreement rates, confusion counts, and deterministic proposal candidates. Confidence is a model score, not measured accuracy. Candidate types are CREATE, MERGE, SPLIT, DEPRECATE, and REFINE_DEFINITION. Candidates do not modify the taxonomy; use `uv run python -m gmail_agent.taxonomy_stats --save-proposals` only if you want to keep candidate records for later review.
 
 Classifications also require `subtype_hint`: a non-binding lowercase snake_case semantic hint of at most 40 characters, or null when no useful subtype is apparent. Hints cannot repeat the primary category; malformed hints are rejected. For example, NEWSLETTER may have `job_alert` and FINANCE may have `subscription_invoice`. Hints never select or create Gmail labels or affect confidence, Review, or Processed decisions.
 
-History databases automatically receive a nullable `subtype_hint` column on opening; existing predictions and reviews are preserved with null hints. The review CLI displays hints as unverified. Accepting or correcting a primary category does not turn the hint into ground truth.
+History databases automatically receive a nullable `subtype_hint` column on opening; existing predictions and reviews are preserved with null hints. Original hints remain in `subtype_hint`. Separate subtype review status, corrected hint, and review timestamp columns preserve human decisions. Accepting or correcting a primary category alone does not approve the hint. The additive migration also adds nullable header fields; existing reviews remain intact and subtype decisions start pending.
 
 Taxonomy stats include unverified `subtype_candidates`, grouped by primary category with counts of distinct messages and reviewed/unreviewed category evidence. The default minimum is three distinct messages; configure it with `uv run python -m gmail_agent.taxonomy_stats --subtype-min-messages 5`. Each message contributes its latest reviewed record, or its latest prediction if never reviewed. Human category corrections take precedence in grouping. Null hints and groups below the threshold are omitted. These exploratory candidates do not change taxonomy files, generate new primary-category proposals, or create Gmail labels.
+
+### Fast local review
+
+```bash
+uv run python -m gmail_agent.review_cli --limit 30 --only-unreviewed
+uv run python -m gmail_agent.review_cli --db .local/gmail_agent.db --limit 50
+uv run python -m gmail_agent.taxonomy_stats --subtype-min-messages 3
+```
+
+The default queue includes pending primary reviews and remaining subtype reviews where a model hint exists. `--limit` caps items shown, including skips; `--all` also displays completed records without allowing saved decisions to be overwritten. Older records need no API lookup and show unavailable headers.
+
+Use one command per item:
+
+- `a` / `accept`: accept primary prediction attributes; leave subtype undecided.
+- `c ADMIN` / `correct ADMIN`: correct the primary category. Bare `c` asks only for the category. Valid categories appear once at startup.
+- `s` / `skip`: leave unchanged for a later session.
+- `q` / `quit`: stop; completed decisions are already saved.
+- `sa`: accept the model subtype; `sr`: reject it; `sc account_notice`: supply a corrected subtype. These can be used independently or appended to a primary action, such as `a sa` or `c ADMIN sc account_notice`.
+
+Corrected hints must be lowercase snake_case, at most 40 characters, and must not repeat the effective primary category. Use rejection to discard a hint; acceptance/rejection requires an existing non-null hint. A combined primary/subtype action validates both decisions before saving either. Subtype-only review never creates primary category ground truth. EOF or Ctrl-C stops safely between decisions.
+
+Stats report primary reviewed count, accepted-category rate and category-correction rate (denominator: primary-reviewed records), separate subtype decision counts, and model subtype disagreement counts/rate (rejected or corrected decisions divided by subtype-reviewed records). Non-category attribute corrections still count as category agreement. Human-approved subtype candidates require both category ground truth and an accepted/corrected subtype; they use the configured distinct-message threshold and the latest explicit subtype decision per message. These are separate from exploratory unverified model hints. Review and stats use local SQLite only, never call Gemini/Gmail, never modify Gmail labels, and never change taxonomy files.
 
 ## Safe automatic triage
 

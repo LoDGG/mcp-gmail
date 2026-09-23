@@ -1,62 +1,90 @@
-"""Fast local review of saved classifier predictions."""
+"""Compact local review of saved predictions; no provider or Gmail access."""
 
 import argparse
 
-from gmail_agent.history import HistoryDB, UNSET
-from gmail_agent.taxonomy import IMPORTANCE_VALUES, load_taxonomy
+from gmail_agent.history import HistoryDB
+from gmail_agent.taxonomy import load_taxonomy
 
 
-def _optional_bool(value: str) -> bool | None:
-    if not value:
-        return None
-    if value.lower() in {"y", "yes"}:
-        return True
-    if value.lower() in {"n", "no"}:
-        return False
-    raise ValueError("Enter y, n, or leave blank")
+def _display(value, limit=120):
+    text = str(value) if value is not None else "unavailable"
+    return "".join(char if char.isprintable() else " " for char in text)[:limit]
+
+
+def _subtype_action(parts):
+    if not parts:
+        return None, None
+    action = {"sa": "accepted", "sr": "rejected", "sc": "corrected"}.get(parts[0].lower())
+    if action is None or len(parts) != (2 if action == "corrected" else 1):
+        raise ValueError("Use sa, sr, or sc snake_case_hint")
+    return action, parts[1] if action == "corrected" else None
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Review saved classifications locally")
     parser.add_argument("--db", help="SQLite database path")
+    parser.add_argument("--limit", type=int, help="Maximum items shown (including skipped items)")
+    queue = parser.add_mutually_exclusive_group()
+    queue.add_argument("--only-unreviewed", dest="only_unreviewed", action="store_true", default=True,
+                       help="Show items with pending category or subtype decisions (default)")
+    queue.add_argument("--all", dest="only_unreviewed", action="store_false",
+                       help="Include completed items; existing decisions cannot be overwritten")
     args = parser.parse_args()
+    if args.limit is not None and args.limit < 1:
+        parser.error("--limit must be positive")
     taxonomy = load_taxonomy()
-    skipped: set[int] = set()
+    print("a/accept | c/correct CATEGORY | s/skip | q/quit")
+    print("Optional subtype: sa=accept, sr=reject, sc HINT=correct; use alone or after a/c.")
+    print("Categories: " + ", ".join(taxonomy.active_names))
     with HistoryDB(args.db) as db:
-        while pending := db.pending(exclude_ids=skipped):
-            row = pending[0]
-            print(f"\nMessage {row['message_id']} | taxonomy {row['taxonomy_version']}")
-            print(f"Predicted {row['predicted_category']} ({row['predicted_confidence']:.2f}), reply={bool(row['predicted_needs_reply'])}, importance={row['predicted_importance']}, deadline={row['predicted_deadline'] or '-'}")
-            print(f"Subtype hint (unverified): {row['subtype_hint'] or '-'}")
-            print(f"Reason: {row['short_reason']}")
-            action = input("[a]ccept, [c]orrect, [s]kip, [q]uit: ").strip().lower()
-            if action == "q":
-                break
-            if action == "s":
-                skipped.add(row["id"])
-                continue
-            if action == "a":
-                db.review(row["id"], "accepted")
-                continue
-            if action != "c":
-                print("Unknown choice")
-                continue
-            try:
-                category = input(f"Category ({', '.join(taxonomy.active_names)}; blank=keep): ").strip().upper() or None
-                if category is not None and category not in taxonomy.active_names:
-                    raise ValueError("Unknown category")
-                needs_reply = _optional_bool(input("Needs reply (y/n; blank=keep): ").strip())
-                importance = input(f"Importance ({'/'.join(IMPORTANCE_VALUES)}; blank=keep): ").strip().lower() or None
-                if importance is not None and importance not in IMPORTANCE_VALUES:
-                    raise ValueError("Unknown importance")
-                deadline_input = input("Deadline (short value; '-'=clear; blank=keep): ").strip()
-                deadline = UNSET if not deadline_input else None if deadline_input == "-" else deadline_input
-                db.review(row["id"], "corrected", category=category, needs_reply=needs_reply,
-                          importance=importance, deadline=deadline, taxonomy=taxonomy)
-            except ValueError as exc:
-                print(exc)
-        else:
-            print("No more pending classifications")
+        rows = db.records()
+        if args.only_unreviewed:
+            rows = [row for row in rows if row["review_status"] == "pending" or (
+                row["subtype_review_status"] == "pending" and row["subtype_hint"] is not None)]
+        rows = rows[:args.limit]
+        for position, row in enumerate(rows, 1):
+            print(f"\n[{position}/{len(rows)}] {_display(row['message_id'])} | date={_display(row['email_date'])}")
+            print(f"From: {_display(row['email_sender'])} | Subject: {_display(row['email_subject'])}")
+            print(f"{row['predicted_category']} {row['predicted_confidence']:.2f} | "
+                  f"subtype={_display(row['subtype_hint'])} | reply={bool(row['predicted_needs_reply'])} | "
+                  f"importance={row['predicted_importance']}"
+                  + (f" | deadline={_display(row['predicted_deadline'])}" if row["predicted_deadline"] else ""))
+            if row["review_status"] != "pending" or row["subtype_review_status"] != "pending":
+                print(f"Saved: category={row['corrected_category'] or row['predicted_category']} "
+                      f"({row['review_status']}), subtype={row['corrected_subtype_hint'] or row['subtype_hint'] or '-'} "
+                      f"({row['subtype_review_status']})")
+            while True:
+                try:
+                    parts = input("> ").strip().split()
+                    if not parts:
+                        continue
+                    action = parts.pop(0).lower()
+                    if action in {"q", "quit"} and not parts:
+                        return
+                    if action in {"s", "skip"} and not parts:
+                        break
+                    category = None
+                    if action in {"c", "correct"}:
+                        category = (parts.pop(0) if parts else input("Category: ").strip()).upper()
+                        if category not in taxonomy.active_names:
+                            raise ValueError("Unknown category; choose one from the category list")
+                        if category == row["predicted_category"]:
+                            raise ValueError("Category unchanged; use accept")
+                    if action in {"a", "accept", "c", "correct"}:
+                        subtype_action, hint = _subtype_action(parts)
+                        db.review(row["id"], "corrected" if category else "accepted",
+                                  category=category, taxonomy=taxonomy,
+                                  subtype_action=subtype_action, corrected_subtype=hint)
+                    else:
+                        subtype_action, hint = _subtype_action([action, *parts])
+                        db.review_subtype(row["id"], subtype_action, corrected_subtype=hint)
+                    break
+                except ValueError as exc:
+                    print(exc)
+                except (EOFError, KeyboardInterrupt):
+                    print("\nReview stopped; completed decisions are saved.")
+                    return
+        print("Review session complete.")
 
 
 if __name__ == "__main__":
